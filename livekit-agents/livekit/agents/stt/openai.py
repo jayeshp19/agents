@@ -17,6 +17,7 @@ from __future__ import annotations
 import dataclasses
 import io
 import os
+import os
 import wave
 from dataclasses import dataclass
 
@@ -31,6 +32,7 @@ except ImportError:
     logger.error("`openai` not installed. Please install it using `pip install openai`")
     raise ImportError
 
+from .models import WhisperModels, GroqAudioModels
 from .models import WhisperModels, GroqAudioModels
 
 
