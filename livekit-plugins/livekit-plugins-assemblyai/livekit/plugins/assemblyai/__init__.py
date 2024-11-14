@@ -1,5 +1,3 @@
-# Copyright 2023 LiveKit, Inc.
-#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -12,4 +10,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-__version__ = "0.11.2"
+from .log import logger
+from .stt import STT, SpeechStream
+from .version import __version__
+
+__all__ = [
+    "STT",
+    "SpeechStream",
+    "logger",
+    "__version__",
+]
+
+from livekit.agents import Plugin
+
+
+class AssemblyAIPlugin(Plugin):
+    def __init__(self):
+        super().__init__(__name__, __version__, __package__)
+
+
+Plugin.register_plugin(AssemblyAIPlugin())
