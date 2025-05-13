@@ -73,13 +73,20 @@ class STTOptions:
     sample_rate: int
     min_confidence_threshold: float
     keywords: NotGivenOr[list[tuple[str, float]]] = NOT_GIVEN
+    adaptation: NotGivenOr[resource_v1.SpeechAdaptation | cloud_speech_v2.SpeechAdaptation] = (
+        NOT_GIVEN
+    )
 
     def build_adaptation(
         self, api_version: str
     ) -> resource_v1.SpeechAdaptation | cloud_speech_v2.SpeechAdaptation | None:
         """
         Build a SpeechAdaptation proto for v1 or v2 if keywords are provided.
+        If a custom adaptation is provided, it takes precedence over keywords.
         """
+        if is_given(self.adaptation):
+            return self.adaptation
+
         if not is_given(self.keywords):
             return None
         if api_version == "v1":
@@ -124,6 +131,9 @@ class STT(stt.STT):
         credentials_info: NotGivenOr[dict] = NOT_GIVEN,
         credentials_file: NotGivenOr[str] = NOT_GIVEN,
         keywords: NotGivenOr[list[tuple[str, float]]] = NOT_GIVEN,
+        adaptation: NotGivenOr[
+            resource_v1.SpeechAdaptation | cloud_speech_v2.SpeechAdaptation
+        ] = NOT_GIVEN,
         use_streaming: NotGivenOr[bool] = NOT_GIVEN,
     ):
         """
@@ -147,6 +157,8 @@ class STT(stt.STT):
             credentials_info(dict): the credentials info to use for recognition (default: None)
             credentials_file(str): the credentials file to use for recognition (default: None)
             keywords(List[tuple[str, float]]): list of keywords to recognize (default: None)
+            adaptation(Union[resource_v1.SpeechAdaptation, cloud_speech_v2.SpeechAdaptation]):
+                custom speech adaptation configuration (default: None)
             use_streaming(bool): whether to use streaming for recognition (default: True)
         """
         if not is_given(use_streaming):
@@ -200,6 +212,7 @@ class STT(stt.STT):
             sample_rate=sample_rate,
             min_confidence_threshold=min_confidence_threshold,
             keywords=keywords,
+            adaptation=adaptation,
         )
         self._streams = weakref.WeakSet[SpeechStream]()
         self._pool = utils.ConnectionPool[
@@ -352,6 +365,9 @@ class STT(stt.STT):
         model: NotGivenOr[SpeechModels] = NOT_GIVEN,
         location: NotGivenOr[str] = NOT_GIVEN,
         keywords: NotGivenOr[list[tuple[str, float]]] = NOT_GIVEN,
+        adaptation: NotGivenOr[
+            resource_v1.SpeechAdaptation | cloud_speech_v2.SpeechAdaptation
+        ] = NOT_GIVEN,
     ):
         if is_given(languages):
             if isinstance(languages, str):
@@ -373,6 +389,8 @@ class STT(stt.STT):
             self._pool.invalidate()
         if is_given(keywords):
             self._config.keywords = keywords
+        if is_given(adaptation):
+            self._config.adaptation = adaptation
 
         for stream in self._streams:
             stream.update_options(
@@ -383,6 +401,7 @@ class STT(stt.STT):
                 spoken_punctuation=spoken_punctuation,
                 model=model,
                 keywords=keywords,
+                adaptation=adaptation,
             )
 
     async def aclose(self) -> None:
@@ -420,6 +439,9 @@ class SpeechStream(stt.SpeechStream):
         model: NotGivenOr[SpeechModels] = NOT_GIVEN,
         min_confidence_threshold: NotGivenOr[float] = NOT_GIVEN,
         keywords: NotGivenOr[list[tuple[str, float]]] = NOT_GIVEN,
+        adaptation: NotGivenOr[
+            resource_v1.SpeechAdaptation | cloud_speech_v2.SpeechAdaptation
+        ] = NOT_GIVEN,
     ):
         if is_given(languages):
             if isinstance(languages, str):
@@ -439,6 +461,8 @@ class SpeechStream(stt.SpeechStream):
             self._config.min_confidence_threshold = min_confidence_threshold
         if is_given(keywords):
             self._config.keywords = keywords
+        if is_given(adaptation):
+            self._config.adaptation = adaptation
 
         self._reconnect_event.set()
 
