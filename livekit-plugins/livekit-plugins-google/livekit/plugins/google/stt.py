@@ -499,7 +499,7 @@ class SpeechStream(stt.SpeechStream):
                         sample_rate_hertz=self._config.sample_rate,
                         audio_channel_count=1,
                     ),
-                    adaptation=self._config.build_adaptation(self._api_version),
+                    adaptation=self._config.build_adaptation("v2"),
                     language_codes=self._config.languages,
                     model=self._config.model,
                     features=types.RecognitionFeatures(
