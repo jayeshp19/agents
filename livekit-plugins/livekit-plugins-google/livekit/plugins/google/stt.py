@@ -28,7 +28,7 @@ import google.cloud.speech_v2 as speech_v2
 import google.cloud.speech_v2.types.cloud_speech as cloud_speech_v2
 import google.protobuf.wrappers_pb2 as wrappers_v1
 from google.api_core.client_options import ClientOptions
-from google.api_core.exceptions import DeadlineExceeded, GoogleAPICallError
+from google.api_core.exceptions import DeadlineExceeded, GoogleAPICallError, OutOfRange
 from google.auth import default as gauth_default
 from google.auth.exceptions import DefaultCredentialsError
 from livekit import rtc
@@ -578,7 +578,7 @@ class SpeechStream(stt.SpeechStream):
                             continue
                         alt = result.alternatives[0]
                         if not alt:
-                            logger.debug("skipping empty result from google STT v1")
+                            logger.debug(f"skipping empty result from google STT v1 {result}")
                             continue
 
                         if (
@@ -676,6 +676,8 @@ class SpeechStream(stt.SpeechStream):
                     finally:
                         await utils.aio.gracefully_cancel(proc_task, wait_task)
                         should_stop.set()
+            except OutOfRange:
+                logger.debug("stream timeout")
             except DeadlineExceeded:
                 raise APITimeoutError() from None
             except GoogleAPICallError as e:
