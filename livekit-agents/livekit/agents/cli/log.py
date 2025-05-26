@@ -25,6 +25,7 @@ NOISY_LOGGERS = [
     "botocore",
     "aiobotocore",
     "mcp.client",
+    "google_genai",
 ]
 
 

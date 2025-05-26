@@ -16,10 +16,11 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import time
 import weakref
 from dataclasses import dataclass
-from typing import Callable, Union
+from typing import Any, Callable, TypedDict, Union
 
 from google.api_core.client_options import ClientOptions
 from google.api_core.exceptions import DeadlineExceeded, GoogleAPICallError
@@ -37,14 +38,16 @@ from livekit.agents import (
     stt,
     utils,
 )
+from livekit.agents.llm.chat_context import AudioContent, ChatContext, ChatMessage
 from livekit.agents.types import (
     NOT_GIVEN,
     NotGivenOr,
 )
 from livekit.agents.utils import is_given
+from livekit.plugins import google
 
 from .log import logger
-from .models import SpeechLanguages, SpeechModels
+from .models import ChatModels, SpeechLanguages, SpeechModels
 
 LgType = Union[SpeechLanguages, str]
 LanguageCode = Union[LgType, list[LgType]]
@@ -104,6 +107,9 @@ class STT(stt.STT):
         credentials_file: NotGivenOr[str] = NOT_GIVEN,
         keywords: NotGivenOr[list[tuple[str, float]]] = NOT_GIVEN,
         use_streaming: NotGivenOr[bool] = NOT_GIVEN,
+        enable_user_state_gating: bool = False,
+        session: NotGivenOr[object] = NOT_GIVEN,
+        buffer_after_speech_ms: int = 800,
     ):
         """
         Create a new instance of Google STT.
@@ -127,6 +133,9 @@ class STT(stt.STT):
             credentials_file(str): the credentials file to use for recognition (default: None)
             keywords(List[tuple[str, float]]): list of keywords to recognize (default: None)
             use_streaming(bool): whether to use streaming for recognition (default: True)
+            enable_user_state_gating(bool): only send audio when user is speaking (default: False)
+            session(object): voice agent session to get user state from (default: None)
+            buffer_after_speech_ms(int): ms to continue sending after speech ends (default: 800)
         """
         if not is_given(use_streaming):
             use_streaming = True
@@ -137,6 +146,9 @@ class STT(stt.STT):
         self._location = location
         self._credentials_info = credentials_info
         self._credentials_file = credentials_file
+        self._enable_user_state_gating = enable_user_state_gating
+        self._session = session
+        self._buffer_after_speech_ms = buffer_after_speech_ms
 
         if not is_given(credentials_file) and not is_given(credentials_info):
             try:
@@ -274,6 +286,9 @@ class STT(stt.STT):
             recognizer_cb=self._get_recognizer,
             config=config,
             conn_options=conn_options,
+            enable_user_state_gating=self._enable_user_state_gating,
+            session=self._session,
+            buffer_after_speech_ms=self._buffer_after_speech_ms,
         )
         self._streams.add(stream)
         return stream
@@ -326,6 +341,15 @@ class STT(stt.STT):
         await self._pool.aclose()
         await super().aclose()
 
+    @staticmethod
+    def with_llm(
+        *,
+        llm: google.LLM,
+        prompt: str | None = None,
+        language: str | None = None,
+    ) -> STT:
+        return _LLMSTT(llm=llm, prompt=prompt, language=language)
+
 
 class SpeechStream(stt.SpeechStream):
     def __init__(
@@ -336,6 +360,9 @@ class SpeechStream(stt.SpeechStream):
         pool: utils.ConnectionPool[SpeechAsyncClient],
         recognizer_cb: Callable[[SpeechAsyncClient], str],
         config: STTOptions,
+        enable_user_state_gating: bool = False,
+        session: NotGivenOr[Any] = NOT_GIVEN,
+        buffer_after_speech_ms: int = 2000,
     ) -> None:
         super().__init__(stt=stt, conn_options=conn_options, sample_rate=config.sample_rate)
 
@@ -344,6 +371,13 @@ class SpeechStream(stt.SpeechStream):
         self._config = config
         self._reconnect_event = asyncio.Event()
         self._session_connected_at: float = 0
+
+        # User state gating
+        self._enable_user_state_gating = enable_user_state_gating
+        self._session = session
+        self._buffer_after_speech_ms = buffer_after_speech_ms
+        self._speech_ended_at: float | None = None
+        self._last_user_state = "listening"
 
     def update_options(
         self,
@@ -397,7 +431,17 @@ class SpeechStream(stt.SpeechStream):
                         return
 
                     if isinstance(frame, rtc.AudioFrame):
-                        yield cloud_speech.StreamingRecognizeRequest(audio=frame.data.tobytes())
+                        # Check if user state gating is enabled
+                        should_send = True
+                        if self._enable_user_state_gating and is_given(self._session):
+                            should_send = self._should_send_frame()
+
+                        if should_send:
+                            logger.debug("User state gating: sending audio to Google STT")
+                            yield cloud_speech.StreamingRecognizeRequest(audio=frame.data.tobytes())
+                        else:
+                            # send dummy frame
+                            yield cloud_speech.StreamingRecognizeRequest(audio=b"x" * 100)
 
             except Exception:
                 logger.exception("an error occurred while streaming input to google STT")
@@ -521,6 +565,42 @@ class SpeechStream(stt.SpeechStream):
             except Exception as e:
                 raise APIConnectionError() from e
 
+    def _should_send_frame(self) -> bool:
+        """Determine if we should send this frame to Google STT based on user state."""
+        if not is_given(self._session):
+            return True
+
+        # Get current user state from session
+        current_state = self._session.user_state
+
+        # Detect state changes
+        if current_state != self._last_user_state:
+            logger.debug(f"User state: {self._last_user_state} → {current_state}")
+            self._last_user_state = current_state
+
+            if current_state == "listening":
+                # User stopped speaking - start buffer timer
+                self._speech_ended_at = time.time()
+
+        # Always send during active speech
+        if current_state == "speaking":
+            self._speech_ended_at = None  # Reset buffer timer
+            return True
+
+        # Send for a buffer period after speech ends
+        if self._speech_ended_at is not None:
+            time_since_speech_ended = time.time() - self._speech_ended_at
+            if time_since_speech_ended < (self._buffer_after_speech_ms / 1000.0):
+                return True
+            else:
+                # Stop sending after buffer period
+                self._speech_ended_at = None
+                logger.debug("Buffer period ended - stopped sending to Google STT")
+                return False
+
+        # Don't send during silence
+        return False
+
 
 def _recognize_response_to_speech_event(
     resp: cloud_speech.RecognizeResponse,
@@ -575,3 +655,158 @@ def _streaming_recognize_response_to_speech_data(
     data = stt.SpeechData(language=lg, start_time=0, end_time=0, confidence=confidence, text=text)
 
     return data
+
+
+DEFAULT_LANGUAGE = "en-US"
+
+SYSTEM_INSTRUCTIONS = """
+You are an **Audio Transcriber**. Your task is to convert audio content into accurate and precise text.
+- Transcribe verbatim; exclude non-speech sounds.
+- Provide only transcription; no extra text or explanations.
+- If audio is unclear, respond with: `...`
+- Ensure error-free transcription, preserving meaning and context.
+- Use proper punctuation and formatting.
+- Do not add explanations, comments, or extra information.
+- Do not include timestamps, speaker labels, or annotations unless specified.
+"""
+
+
+class TranscriptionResponse(TypedDict):
+    transcription: str
+    """
+    The transcription of the audio.
+    """
+    language: str
+    """
+    language(BCP-47 Code) of the audio
+    """
+    confidence: float
+    """
+    Confidence score of the transcription.
+    """
+
+
+class _LLMSTT(stt.STT):
+    def __init__(
+        self,
+        *,
+        llm: google.LLM,
+        prompt: str | None = None,
+        language: str | None = None,
+    ) -> None:
+        super().__init__(capabilities=stt.STTCapabilities(streaming=False, interim_results=False))
+        self._llm = llm
+        self._prompt = prompt or SYSTEM_INSTRUCTIONS
+        self._language = language or DEFAULT_LANGUAGE
+
+    async def _recognize_impl(
+        self,
+        buffer: utils.AudioBuffer,
+        *,
+        language: NotGivenOr[str] = NOT_GIVEN,
+        conn_options: APIConnectOptions,
+    ) -> stt.SpeechEvent:
+        if is_given(language):
+            self._language = language
+
+        self._prompt = self._prompt + f"\nAudio Language: {self._language}"
+        if isinstance(buffer, rtc.AudioFrame):
+            buffer = [buffer]
+
+        chat_ctx = ChatContext.empty()
+        chat_ctx.items.append(ChatMessage(role="system", content=[self._prompt]))
+        chat_ctx.items.append(
+            ChatMessage(
+                role="user",
+                content=[AudioContent(type="audio_content", frame=buffer)],
+            )
+        )
+
+        transcription = ""
+        start_time = time.monotonic()
+        async for chunk in self._llm.chat(
+            chat_ctx=chat_ctx,
+            response_format=TranscriptionResponse,
+        ).to_str_iterable():
+            if transcription == "":
+                first_chunk_time = time.monotonic()
+                logger.debug(f"First chunk time: {first_chunk_time - start_time}")
+            transcription += chunk
+
+        end_time = time.monotonic()
+        logger.debug(f"End time: {end_time - start_time}")
+
+        result = json.loads(transcription)
+
+        data = stt.SpeechData(
+            language=result.get("language", self._language),
+            text=result.get("transcription", ""),
+            confidence=result.get("confidence", 0.0),
+        )
+        return stt.SpeechEvent(
+            type=stt.SpeechEventType.FINAL_TRANSCRIPT,
+            alternatives=[data],
+        )
+
+
+class _ModelSTT(stt.STT):
+    def __init__(
+        self,
+        *,
+        model: ChatModels | str = "gemini-2.0-flash-001",
+        prompt: str | None = None,
+        language: str | None = None,
+    ) -> None:
+        super().__init__(capabilities=stt.STTCapabilities(streaming=False, interim_results=False))
+        self._model = model
+        self._prompt = prompt or SYSTEM_INSTRUCTIONS
+        self._language = language or DEFAULT_LANGUAGE
+
+    async def _recognize_impl(
+        self,
+        buffer: utils.AudioBuffer,
+        *,
+        language: NotGivenOr[str] = NOT_GIVEN,
+        conn_options: APIConnectOptions,
+    ) -> stt.SpeechEvent:
+        if is_given(language):
+            self._language = language
+
+        self._prompt = self._prompt + f"\nAudio Language: {self._language}"
+        if isinstance(buffer, rtc.AudioFrame):
+            buffer = [buffer]
+
+        chat_ctx = ChatContext.empty()
+        chat_ctx.items.append(ChatMessage(role="system", content=[self._prompt]))
+        chat_ctx.items.append(
+            ChatMessage(
+                role="user",
+                content=[AudioContent(type="audio_content", frame=buffer)],
+            )
+        )
+
+        transcription = ""
+        start_time = time.monotonic()
+        async for chunk in self._llm.chat(
+            chat_ctx=chat_ctx,
+            response_format=TranscriptionResponse,
+        ).to_str_iterable():
+            if transcription == "":
+                first_chunk_time = time.monotonic()
+                logger.debug(f"First chunk time: {first_chunk_time - start_time}")
+            transcription += chunk
+
+        end_time = time.monotonic()
+        logger.debug(f"End time: {end_time - start_time}")
+
+        result = json.loads(transcription)
+
+        data = stt.SpeechData(
+            language=result.get("language", self._language),
+            text=result.get("transcription", ""),
+            confidence=result.get("confidence", 0.0),
+        )
+        return stt.SpeechEvent(
+            type=stt.SpeechEventType.FINAL_TRANSCRIPT,
+            alternatives=[data],
+        )

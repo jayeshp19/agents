@@ -8,6 +8,7 @@ from typing import Any
 from pydantic import TypeAdapter
 
 from google.genai import types
+from livekit import rtc
 from livekit.agents import llm
 from livekit.agents.llm import utils as llm_utils
 from livekit.agents.llm.tool_context import (
@@ -100,6 +101,9 @@ def to_chat_ctx(
                     parts.append(types.Part(text=json.dumps(content)))
                 elif isinstance(content, llm.ImageContent):
                     parts.append(_to_image_part(content, cache_key))
+                elif isinstance(content, llm.AudioContent):
+                    data = rtc.combine_audio_frames(content.frame).to_wav_bytes()
+                    parts.append(types.Part.from_bytes(data=data, mime_type="audio/wav"))
         elif msg.type == "function_call" and not ignore_functions:
             parts.append(
                 types.Part(
