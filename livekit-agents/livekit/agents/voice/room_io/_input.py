@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Iterable
-from typing import Generic, TypeVar, Union
+from typing import Any, Generic, TypeVar, Union, cast
 
 from typing_extensions import override
 
@@ -43,8 +43,8 @@ class _ParticipantInputStream(Generic[T], ABC):
         self._participant_identity: str | None = None
         self._attached = True
 
-        self._forward_atask: asyncio.Task | None = None
-        self._tasks: set[asyncio.Task] = set()
+        self._forward_atask: asyncio.Task[None] | None = None
+        self._tasks: set[asyncio.Task[Any]] = set()
 
         self._room.on("track_subscribed", self._on_track_available)
         self._room.on("track_unpublished", self._on_track_unavailable)
@@ -87,10 +87,10 @@ class _ParticipantInputStream(Generic[T], ABC):
         )
         self._attached = False
 
-    def set_participant(self, participant: rtc.Participant | str | None) -> None:
+    def set_participant(self, participant: rtc.RemoteParticipant | str | None) -> None:
         # set_participant can be called before the participant is connected
         participant_identity = (
-            participant.identity if isinstance(participant, rtc.Participant) else participant
+            participant.identity if isinstance(participant, rtc.RemoteParticipant) else participant
         )
         if self._participant_identity == participant_identity:
             return
@@ -103,7 +103,7 @@ class _ParticipantInputStream(Generic[T], ABC):
 
         participant = (
             participant
-            if isinstance(participant, rtc.Participant)
+            if isinstance(participant, rtc.RemoteParticipant)
             else self._room.remote_participants.get(participant_identity)
         )
         if participant:
@@ -126,7 +126,7 @@ class _ParticipantInputStream(Generic[T], ABC):
     @log_exceptions(logger=logger)
     async def _forward_task(
         self,
-        old_task: asyncio.Task | None,
+        old_task: asyncio.Task[None] | None,
         stream: rtc.VideoStream | rtc.AudioStream,
         publication: rtc.RemoteTrackPublication,
         participant: rtc.RemoteParticipant,
@@ -143,7 +143,7 @@ class _ParticipantInputStream(Generic[T], ABC):
             if not self._attached:
                 # drop frames if the stream is detached
                 continue
-            await self._data_ch.send(event.frame)
+            await self._data_ch.send(cast(T, event.frame))
 
         logger.debug("stream closed", extra=extra)
 
@@ -193,6 +193,8 @@ class _ParticipantInputStream(Generic[T], ABC):
 
         # subscribe to the first available track
         for publication in participant.track_publications.values():
+            if publication.track is None:
+                continue
             if self._on_track_available(publication.track, publication, participant):
                 return
 
@@ -227,18 +229,25 @@ class _ParticipantAudioInputStream(_ParticipantInputStream[rtc.AudioFrame], Audi
     @override
     async def _forward_task(
         self,
-        old_task: asyncio.Task | None,
-        stream: rtc.AudioStream,
+        old_task: asyncio.Task[None] | None,
+        stream: rtc.AudioStream,  # type: ignore[override]
         publication: rtc.RemoteTrackPublication,
         participant: rtc.RemoteParticipant,
     ) -> None:
+        if old_task:
+            await aio.cancel_and_wait(old_task)
+
         if (
             self._pre_connect_audio_handler
             and publication.track
             and AudioTrackFeature.TF_PRECONNECT_BUFFER in publication.audio_features
         ):
+            logging_extra = {
+                "track_id": publication.track.sid,
+                "participant": participant.identity,
+            }
             try:
-                duration = 0
+                duration: float = 0
                 frames = await self._pre_connect_audio_handler.wait_for_data(publication.track.sid)
                 for frame in self._resample_frames(frames):
                     if self._attached:
@@ -247,34 +256,32 @@ class _ParticipantAudioInputStream(_ParticipantInputStream[rtc.AudioFrame], Audi
                 if frames:
                     logger.debug(
                         "pre-connect audio buffer pushed",
-                        extra={
-                            "duration": duration,
-                            "track_id": publication.track.sid,
-                            "participant": participant.identity,
-                        },
+                        extra={"duration": duration, **logging_extra},
                     )
 
             except asyncio.TimeoutError:
                 logger.warning(
                     "timeout waiting for pre-connect audio buffer",
-                    extra={
-                        "duration": duration,
-                        "track_id": publication.track.sid,
-                        "participant": participant.identity,
-                    },
+                    extra=logging_extra,
                 )
 
             except Exception as e:
                 logger.error(
-                    "error reading pre-connect audio buffer",
-                    extra={
-                        "error": e,
-                        "track_id": publication.track.sid,
-                        "participant": participant.identity,
-                    },
+                    "error reading pre-connect audio buffer", extra=logging_extra, exc_info=e
                 )
 
         await super()._forward_task(old_task, stream, publication, participant)
+
+        # push a silent frame to flush the stt final result if any
+        silent_samples = int(self._sample_rate * 0.5)
+        await self._data_ch.send(
+            rtc.AudioFrame(
+                b"\x00\x00" * silent_samples,
+                sample_rate=self._sample_rate,
+                num_channels=self._num_channels,
+                samples_per_channel=silent_samples,
+            )
+        )
 
     def _resample_frames(self, frames: Iterable[rtc.AudioFrame]) -> Iterable[rtc.AudioFrame]:
         resampler: rtc.AudioResampler | None = None
