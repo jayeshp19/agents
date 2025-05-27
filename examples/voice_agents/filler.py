@@ -1,10 +1,13 @@
 import asyncio
 
+from google.cloud import texttospeech
+
 from livekit.agents import AgentSession, JobContext, WorkerOptions, cli
 from livekit.agents.llm.tool_context import function_tool
 from livekit.agents.voice.agent import Agent
 from livekit.agents.voice.events import UserStateChangedEvent
 from livekit.plugins import deepgram, google, groq, silero
+from livekit.plugins.google import TTS as GoogleTTS
 
 
 class MyAgent(Agent):
@@ -19,6 +22,18 @@ class MyAgent(Agent):
         return f"The weather in {city} is sunny."
 
 
+async def play_filler_audio(session, text: str):
+    audio_out = session.output.audio
+    if audio_out is None:
+        return
+
+    tts = GoogleTTS(audio_encoding=texttospeech.AudioEncoding.LINEAR16)
+    stream = tts.synthesize(text)
+    async for ev in stream:
+        await audio_out.capture_frame(ev.frame)
+    await tts.aclose()
+
+
 async def entrypoint(ctx: JobContext):
     await ctx.connect()
 
@@ -30,7 +45,7 @@ async def entrypoint(ctx: JobContext):
         vad=silero.VAD.load(),
     )
 
-    # — second “filler” LLM
+    # — second "filler" LLM
     filler_llm = groq.LLM(temperature=0.7)
 
     # keep a handle so we can cancel if the user stops speaking
@@ -61,7 +76,8 @@ async def entrypoint(ctx: JobContext):
                 out += chunk
             print(out)
 
-            filler_speech = session.say(out, add_to_chat_ctx=False, allow_interruptions=False)
+            # filler_speech = session.say(out, add_to_chat_ctx=False, allow_interruptions=False
+            asyncio.create_task(play_filler_audio(session, out))
 
     # subscribe to the state‐change event
     session.on("user_state_changed", lambda ev: asyncio.create_task(on_user_state(ev)))
