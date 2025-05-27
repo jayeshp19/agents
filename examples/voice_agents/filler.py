@@ -75,7 +75,7 @@ async def entrypoint(ctx: JobContext):
             async for chunk in filler_llm.chat(chat_ctx=filler_chat_ctx).to_str_iterable():
                 out += chunk
             print(out)
-
+            seen_fillers.append(out)
             # filler_speech = session.say(out, add_to_chat_ctx=False, allow_interruptions=False
             asyncio.create_task(play_filler_audio(session, out))
 
