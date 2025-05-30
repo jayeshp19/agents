@@ -85,7 +85,7 @@ class SpeechHandle:
     def done(self) -> bool:
         return self._playout_done_fut.done()
 
-    def interrupt(self) -> SpeechHandle:
+    def interrupt(self, ignore_runtime_errors: bool = False) -> SpeechHandle:
         """Interrupt the current speech generation.
 
         Raises:
@@ -94,7 +94,7 @@ class SpeechHandle:
         Returns:
             SpeechHandle: The same speech handle that was interrupted.
         """
-        if not self._allow_interruptions:
+        if not self._allow_interruptions and not ignore_runtime_errors:
             raise RuntimeError("This generation handle does not allow interruptions")
 
         if self.done():

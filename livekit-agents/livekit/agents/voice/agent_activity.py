@@ -615,7 +615,7 @@ class AgentActivity(RecognitionHooks):
         self._schedule_speech(handle, SpeechHandle.SPEECH_PRIORITY_NORMAL)
         return handle
 
-    def interrupt(self) -> asyncio.Future[None]:
+    def interrupt(self, ignore_runtime_errors: bool = False) -> asyncio.Future[None]:
         """Interrupt the current speech generation and any queued speeches.
 
         Returns:
@@ -626,10 +626,10 @@ class AgentActivity(RecognitionHooks):
         current_speech = self._current_speech
 
         if current_speech is not None:
-            current_speech = current_speech.interrupt()
+            current_speech = current_speech.interrupt(ignore_runtime_errors=ignore_runtime_errors)
 
         for _, _, speech in self._speech_q:
-            speech.interrupt()
+            speech.interrupt(ignore_runtime_errors=ignore_runtime_errors)
 
         if self._rt_session is not None:
             self._rt_session.interrupt()
