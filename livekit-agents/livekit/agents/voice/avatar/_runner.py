@@ -78,13 +78,7 @@ class AvatarRunner:
 
         # start audio receiver
         await self._audio_recv.start()
-
-        def _on_clear_buffer() -> None:
-            task = asyncio.create_task(self._handle_clear_buffer())
-            self._tasks.add(task)
-            task.add_done_callback(self._tasks.discard)
-
-        self._audio_recv.on("clear_buffer", _on_clear_buffer)
+        self._audio_recv.on("clear_buffer", self._on_clear_buffer)
 
         if not self._lazy_publish:
             await self._publish_track()
@@ -98,19 +92,16 @@ class AvatarRunner:
     async def _publish_track(self) -> None:
         async with self._lock:
             audio_track = rtc.LocalAudioTrack.create_audio_track("avatar_audio", self._audio_source)
-            video_track = rtc.LocalVideoTrack.create_video_track("avatar_video", self._video_source)
             audio_options = rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE)
-            video_options = rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_CAMERA)
             self._audio_publication = await self._room.local_participant.publish_track(
                 audio_track, audio_options
             )
+            await self._audio_publication.wait_for_subscription()
+
+            video_track = rtc.LocalVideoTrack.create_video_track("avatar_video", self._video_source)
+            video_options = rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_CAMERA)
             self._video_publication = await self._room.local_participant.publish_track(
                 video_track, video_options
-            )
-
-            await asyncio.gather(
-                self._audio_publication.wait_for_subscription(),
-                self._video_publication.wait_for_subscription(),
             )
 
     @log_exceptions(logger=logger)
@@ -125,9 +116,6 @@ class AvatarRunner:
         """Forward video to the room through the AV synchronizer"""
 
         async for frame in self._video_gen:
-            if not self._video_publication:
-                await self._publish_track()
-
             if isinstance(frame, AudioSegmentEnd):
                 # notify the agent that the audio has finished playing
                 if self._audio_playing:
@@ -135,35 +123,41 @@ class AvatarRunner:
                         playback_position=self._playback_position,
                         interrupted=False,
                     )
+                    self._audio_playing = False
+                    self._playback_position = 0.0
                     if asyncio.iscoroutine(notify_task):
                         await notify_task
-                    self._playback_position = 0.0
-                self._audio_playing = False
                 continue
+
+            if not self._video_publication:
+                await self._publish_track()
 
             await self._av_sync.push(frame)
             if isinstance(frame, rtc.AudioFrame):
                 self._playback_position += frame.duration
 
-    @log_exceptions(logger=logger)
-    async def _handle_clear_buffer(self) -> None:
+    def _on_clear_buffer(self) -> None:
         """Handle clearing the buffer and notify about interrupted playback"""
-        tasks = []
-        clear_result = self._video_gen.clear_buffer()
-        if asyncio.iscoroutine(clear_result):
-            tasks.append(clear_result)
 
-        if self._audio_playing:
-            notify_task = self._audio_recv.notify_playback_finished(
-                playback_position=self._playback_position,
-                interrupted=True,
-            )
-            if asyncio.iscoroutine(notify_task):
-                tasks.append(notify_task)
-            self._playback_position = 0.0
-            self._audio_playing = False
+        @log_exceptions(logger=logger)
+        async def _handle_clear_buffer(audio_playing: bool) -> None:
+            clear_task = self._video_gen.clear_buffer()
+            if asyncio.iscoroutine(clear_task):
+                await clear_task
 
-        await asyncio.gather(*tasks)
+            if audio_playing:
+                notify_task = self._audio_recv.notify_playback_finished(
+                    playback_position=self._playback_position,
+                    interrupted=True,
+                )
+                self._playback_position = 0.0
+                if asyncio.iscoroutine(notify_task):
+                    await notify_task
+
+        task = asyncio.create_task(_handle_clear_buffer(self._audio_playing))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        self._audio_playing = False
 
     def _on_reconnected(self) -> None:
         if self._lazy_publish and not self._video_publication:
