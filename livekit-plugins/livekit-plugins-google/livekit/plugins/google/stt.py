@@ -441,7 +441,6 @@ class SpeechStream(stt.SpeechStream):
                             should_send = self._should_send_frame()
 
                         if should_send:
-                            logger.debug("User state gating: sending audio to Google STT")
                             yield cloud_speech.StreamingRecognizeRequest(audio=frame.data.tobytes())
                         else:
                             # send dummy frame
@@ -654,7 +653,7 @@ def _streaming_recognize_response_to_speech_data(
     confidence /= len(resp.results)
     lg = resp.results[0].language_code
 
-    if confidence < min_confidence_threshold:
+    if confidence > 0.0 and confidence < min_confidence_threshold:
         return None
     if text == "":
         return None
