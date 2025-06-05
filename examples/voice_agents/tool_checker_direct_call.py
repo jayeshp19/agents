@@ -43,8 +43,11 @@ class MyAgent(Agent):
         self._tool_llm_prompt = llm.ChatMessage(
             role="system",
             content=[
-                "Decide if a function call is needed for the user's last message. ",
-                "If so, respond in JSON: {\"function_call_needed\": true, \"function_name\": \"<name>\", \"arguments\": {...}}. ",
+                "Decide if a function call is needed for the user's last message.",
+                (
+                    "If so, respond in JSON: {\"function_call_needed\": true, "
+                    "\"function_name\": \"<name>\", \"arguments\": {...}}."
+                ),
                 "Otherwise respond with {\"function_call_needed\": false}.",
             ],
         )
@@ -59,12 +62,21 @@ class MyAgent(Agent):
         self._last_tool_task = asyncio.create_task(self._tool_handler(turn_ctx, new_message))
 
     async def _tool_handler(self, turn_ctx: ChatContext, new_message: ChatMessage) -> None:
-        ctx = turn_ctx.copy(exclude_instructions=True, exclude_function_call=True).truncate(max_items=3)
+        ctx = (
+            turn_ctx.copy(
+                exclude_instructions=True,
+                exclude_function_call=True,
+            ).truncate(max_items=3)
+        )
         ctx.items.insert(0, self._tool_llm_prompt)
         ctx.items.append(new_message)
 
         result = ""
-        async for chunk in self._tool_llm.chat(chat_ctx=ctx, response_format=ToolDecision).to_str_iterable():
+        async for chunk in self._tool_llm.chat(
+            chat_ctx=ctx,
+            tools=list(self._tools.function_tools.values()),
+            response_format=ToolDecision,
+        ).to_str_iterable():
             result += chunk
         logger.info("Tool decision: %s", result)
         try:
@@ -87,8 +99,16 @@ class MyAgent(Agent):
             name=fn_name,
         )
         speech_handle = SpeechHandle.create()
-        run_ctx = RunContext(session=self.session, speech_handle=speech_handle, function_call=fn_call)
-        call_args, call_kwargs = prepare_function_arguments(fnc=tool, json_arguments=json.dumps(args), call_ctx=run_ctx)
+        run_ctx = RunContext(
+            session=self.session,
+            speech_handle=speech_handle,
+            function_call=fn_call,
+        )
+        call_args, call_kwargs = prepare_function_arguments(
+            fnc=tool,
+            json_arguments=json.dumps(args),
+            call_ctx=run_ctx,
+        )
         output = await tool(*call_args, **call_kwargs)
 
         self._chat_ctx.items.append(fn_call)
