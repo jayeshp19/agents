@@ -82,6 +82,7 @@ class AgentActivity(RecognitionHooks):
         self._main_atask: asyncio.Task[None] | None = None
         self._user_turn_completed_atask: asyncio.Task[None] | None = None
         self._speech_tasks: list[asyncio.Task[Any]] = []
+        self._backoff_until = 0.0
 
         self._turn_detection_mode = (
             self.turn_detection if isinstance(self.turn_detection, str) else None
@@ -218,6 +219,14 @@ class AgentActivity(RecognitionHooks):
             self._agent.min_consecutive_speech_delay
             if is_given(self._agent.min_consecutive_speech_delay)
             else self._session.options.min_consecutive_speech_delay
+        )
+
+    @property
+    def backoff_seconds(self) -> float:
+        return (
+            self._agent.backoff_seconds
+            if is_given(self._agent.backoff_seconds)
+            else self._session.options.backoff_seconds
         )
 
     async def update_instructions(self, instructions: str) -> None:
@@ -645,6 +654,8 @@ class AgentActivity(RecognitionHooks):
         if self._rt_session is not None:
             self._rt_session.interrupt()
 
+        self._backoff_until = time.time() + self.backoff_seconds
+
         if current_speech is None:
             future.set_result(None)
         else:
@@ -701,6 +712,9 @@ class AgentActivity(RecognitionHooks):
             while self._speech_q:
                 _, _, speech = heapq.heappop(self._speech_q)
                 self._current_speech = speech
+                now = time.time()
+                if now < self._backoff_until:
+                    await asyncio.sleep(self._backoff_until - now)
                 if self.min_consecutive_speech_delay > 0.0:
                     await asyncio.sleep(
                         self.min_consecutive_speech_delay - (time.time() - last_playout_ts)

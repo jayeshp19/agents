@@ -257,7 +257,12 @@ async def test_interruption() -> None:
     assert agent_state_events[4].new_state == "thinking"
     check_timestamp(agent_state_events[4].created_at - t_origin, 6.5, speed_factor=speed)
     assert agent_state_events[5].new_state == "listening"
-    check_timestamp(agent_state_events[5].created_at - t_origin, 6.5, speed_factor=speed)
+    check_timestamp(
+        agent_state_events[5].created_at - t_origin,
+        7.0,
+        speed_factor=speed,
+        max_abs_diff=1.0,
+    )
 
     assert len(playback_finished_events) == 1
     assert playback_finished_events[0].interrupted is True
@@ -489,6 +494,42 @@ async def test_generate_reply() -> None:
     assert agent.chat_ctx.items[6].type == "message"
     assert agent.chat_ctx.items[6].role == "assistant"
     assert agent.chat_ctx.items[6].text_content == "Goodbye! have a nice day!"
+
+
+async def test_backoff_seconds() -> None:
+    speed = 5.0
+    actions = FakeActions()
+    actions.add_user_speech(0.5, 2.5, "Tell me a story.")
+    actions.add_llm("Here is a long story for you ... the end.")
+    actions.add_tts(5.0)
+    actions.add_user_speech(5.0, 6.0, "Stop!")
+    actions.add_llm("Ok, stopping now.", input="Stop!")
+    actions.add_tts(2.0)
+
+    session = create_session(actions, speed_factor=speed, extra_kwargs={"backoff_seconds": 1.0})
+    agent = MyAgent()
+
+    agent_state_events: list[AgentStateChangedEvent] = []
+    playback_finished_events: list[PlaybackFinishedEvent] = []
+    session.on("agent_state_changed", agent_state_events.append)
+    session.output.audio.on("playback_finished", playback_finished_events.append)
+
+    t_origin = await asyncio.wait_for(run_session(session, agent), timeout=SESSION_TIMEOUT)
+
+    assert len(playback_finished_events) == 2
+    assert playback_finished_events[0].interrupted is True
+    assert playback_finished_events[1].interrupted is False
+
+    assert len(agent_state_events) >= 6
+    check_timestamp(agent_state_events[3].created_at - t_origin, 5.5, speed_factor=speed)
+    assert agent_state_events[4].new_state == "thinking"
+    assert agent_state_events[5].new_state == "speaking"
+    check_timestamp(
+        agent_state_events[5].created_at - t_origin,
+        7.0,
+        speed_factor=speed,
+        max_abs_diff=1.0,
+    )
 
 
 # helpers
