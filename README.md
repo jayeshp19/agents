@@ -118,6 +118,10 @@ You'll need the following environment variables for this example:
 - DEEPGRAM_API_KEY
 - OPENAI_API_KEY
 
+The session constructor accepts additional options to fine-tune conversation
+flow. For example, ``backoff_seconds`` controls how long the assistant waits
+after an interruption before speaking again.
+
 ### Multi-agent handoff
 
 ---

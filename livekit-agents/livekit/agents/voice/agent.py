@@ -40,6 +40,7 @@ class Agent:
         mcp_servers: NotGivenOr[list[mcp.MCPServer] | None] = NOT_GIVEN,
         allow_interruptions: NotGivenOr[bool] = NOT_GIVEN,
         min_consecutive_speech_delay: NotGivenOr[float] = NOT_GIVEN,
+        backoff_seconds: NotGivenOr[float] = NOT_GIVEN,
     ) -> None:
         tools = tools or []
         self._instructions = instructions
@@ -52,6 +53,7 @@ class Agent:
         self._vad = vad
         self._allow_interruptions = allow_interruptions
         self._min_consecutive_speech_delay = min_consecutive_speech_delay
+        self._backoff_seconds = backoff_seconds
 
         if isinstance(mcp_servers, list) and len(mcp_servers) == 0:
             mcp_servers = None  # treat empty list as None (but keep NOT_GIVEN)
@@ -524,6 +526,12 @@ class Agent:
             NotGivenOr[float]: The minimum consecutive speech delay.
         """
         return self._min_consecutive_speech_delay
+
+    @property
+    def backoff_seconds(self) -> NotGivenOr[float]:
+        """Duration to pause new speech after an interruption."""
+
+        return self._backoff_seconds
 
     @property
     def session(self) -> AgentSession:
