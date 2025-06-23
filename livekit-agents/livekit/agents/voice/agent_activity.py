@@ -869,6 +869,7 @@ class AgentActivity(RecognitionHooks):
                 "speech interrupted by vad",
                 speech_id=self._current_speech.id,
             )
+            self._backoff_until = time.time() + self.backoff_seconds
             if self._rt_session is not None:
                 self._rt_session.interrupt()
 
@@ -975,6 +976,7 @@ class AgentActivity(RecognitionHooks):
                 "speech interrupted, new user turn detected",
                 speech_id=self._current_speech.id,
             )
+            self._backoff_until = time.time() + self.backoff_seconds
 
             self._current_speech.interrupt()
             if self._rt_session is not None:
