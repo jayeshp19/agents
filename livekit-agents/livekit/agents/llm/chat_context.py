@@ -31,7 +31,6 @@ from . import _provider_format
 
 if TYPE_CHECKING:
     from ..llm import FunctionTool, RawFunctionTool
-    from ..voice import Agent
 
 
 class ImageContent(BaseModel):
@@ -112,6 +111,7 @@ class ChatMessage(BaseModel):
     role: ChatRole
     content: list[ChatContent]
     interrupted: bool = False
+    transcript_confidence: float | None = None
     hash: bytes | None = None
     created_at: float = Field(default_factory=time.time)
 
@@ -150,15 +150,16 @@ class FunctionCallOutput(BaseModel):
     created_at: float = Field(default_factory=time.time)
 
 
-# class AgentHandoff(BaseModel):
-#     id: str = Field(default_factory=lambda: utils.shortuuid("item_"))
-#     type: Literal["agent_handoff"] = Field(default="agent_handoff")
-#     old_agent_id: str | None
-#     new_agent_id: str
-#     old_agent: Agent | None = Field(exclude=True)
-#     new_agent: Agent | None = Field(exclude=True)
-#     created_at: float = Field(default_factory=time.time)
-
+""""
+class AgentHandoff(BaseModel):
+    id: str = Field(default_factory=lambda: utils.shortuuid("item_"))
+    type: Literal["agent_handoff"] = Field(default="agent_handoff")
+    old_agent_id: str | None
+    new_agent_id: str
+    old_agent: Agent | None = Field(exclude=True)
+    new_agent: Agent | None = Field(exclude=True)
+    created_at: float = Field(default_factory=time.time)
+"""
 
 ChatItem = Annotated[
     Union[ChatMessage, FunctionCall, FunctionCallOutput], Field(discriminator="type")
@@ -212,7 +213,7 @@ class ChatContext:
 
     def insert(self, item: ChatItem | Sequence[ChatItem]) -> None:
         """Insert an item or list of items into the chat context by creation time."""
-        items = item if isinstance(item, list) else [item]
+        items = list(item) if isinstance(item, Sequence) else [item]
 
         for _item in items:
             idx = self.find_insertion_index(created_at=_item.created_at)
@@ -305,10 +306,36 @@ class ChatContext:
         self._items[:] = new_items
         return self
 
-    def merge(self, other_chat_ctx: ChatContext) -> None:
-        """add messages from the other_chat_ctx inside this one if not present"""
+    def merge(
+        self,
+        other_chat_ctx: ChatContext,
+        *,
+        exclude_function_call: bool = False,
+        exclude_instructions: bool = False,
+    ) -> ChatContext:
+        """Add messages from `other_chat_ctx` into this one, avoiding duplicates, and keep items sorted by created_at."""
+        existing_ids = {item.id for item in self._items}
 
-        pass
+        for item in other_chat_ctx.items:
+            if exclude_function_call and item.type in [
+                "function_call",
+                "function_call_output",
+            ]:
+                continue
+
+            if (
+                exclude_instructions
+                and item.type == "message"
+                and item.role in ["system", "developer"]
+            ):
+                continue
+
+            if item.id not in existing_ids:
+                idx = self.find_insertion_index(created_at=item.created_at)
+                self._items.insert(idx, item)
+                existing_ids.add(item.id)
+
+        return self
 
     def to_dict(
         self,
@@ -320,7 +347,10 @@ class ChatContext:
     ) -> dict[str, Any]:
         items: list[ChatItem] = []
         for item in self.items:
-            if exclude_function_call and item.type in ["function_call", "function_call_output"]:
+            if exclude_function_call and item.type in [
+                "function_call",
+                "function_call_output",
+            ]:
                 continue
 
             if item.type == "message":

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextvars
 import copy
 import time
 from collections.abc import AsyncIterable
@@ -18,7 +17,6 @@ from typing import (
 )
 
 from livekit import rtc
-from livekit.agents.llm.chat_context import ChatItem
 
 from .. import debug, llm, stt, tts, utils, vad
 from ..cli import cli
@@ -47,8 +45,8 @@ from .events import (
     UserState,
     UserStateChangedEvent,
 )
-from .speech_handle import SpeechHandle
 from .run_result import RunResult
+from .speech_handle import SpeechHandle
 
 if TYPE_CHECKING:
     from ..llm import mcp
@@ -74,6 +72,7 @@ class VoiceOptions:
     max_tool_steps: int
     user_away_timeout: float | None
     min_consecutive_speech_delay: float
+    use_tts_aligned_transcript: bool
 
 
 Userdata_T = TypeVar("Userdata_T")
@@ -151,6 +150,7 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
         video_sampler: NotGivenOr[_VideoSampler | None] = NOT_GIVEN,
         user_away_timeout: float | None = 15.0,
         min_consecutive_speech_delay: float = 0.0,
+        use_tts_aligned_transcript: bool = False,
         conn_options: NotGivenOr[SessionConnectOptions] = NOT_GIVEN,
         loop: asyncio.AbstractEventLoop | None = None,
     ) -> None:
@@ -211,6 +211,10 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
                 Default ``15.0`` s, set to ``None`` to disable.
             min_consecutive_speech_delay (float, optional): The minimum delay between
                 consecutive speech. Default ``0.0`` s.
+            use_tts_aligned_transcript (bool, optional): Whether to use TTS-aligned
+                transcript as the input of the ``transcription_node``. Only applies
+                if ``TTS.capabilities.aligned_transcript`` is ``True`` or ``streaming``
+                is ``False``.
             conn_options (SessionConnectOptions, optional): Connection options for
                 stt, llm, and tts.
             loop (asyncio.AbstractEventLoop, optional): Event loop to bind the
@@ -236,6 +240,7 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
             max_tool_steps=max_tool_steps,
             user_away_timeout=user_away_timeout,
             min_consecutive_speech_delay=min_consecutive_speech_delay,
+            use_tts_aligned_transcript=use_tts_aligned_transcript,
         )
         self._conn_options = conn_options or SessionConnectOptions()
         self._started = False
@@ -339,11 +344,11 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
 
         return self._agent
 
-    def run(self, *, user_input: str, output_type: Run_T = None) -> RunResult[Run_T]:
+    def run(self, *, user_input: str, output_type: type[Run_T] | None = None) -> RunResult[Run_T]:
         if self._global_run_state is not None and not self._global_run_state.done():
             raise RuntimeError("nested runs are not supported")
 
-        run_state = RunResult(output_type=output_type)
+        run_state = RunResult(user_input=user_input, output_type=output_type)
         self._global_run_state = run_state
         self.generate_reply(user_input=user_input)
         return run_state
@@ -427,12 +432,6 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
                 )
                 tasks.append(asyncio.create_task(self._room_io.start(), name="_room_io_start"))
 
-            else:
-                if not self._room_io and not self.output.audio and not self.output.transcription:
-                    logger.warning(
-                        "session starts without output, forgetting to pass `room` to `AgentSession.start()`?"  # noqa: E501
-                    )
-
             # session can be restarted, register the callbacks only once
             try:
                 job_ctx = get_job_context()
@@ -473,6 +472,13 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
 
             self._started = True
             self._update_agent_state("listening")
+            if self._room_io and self._room_io.subscribed_fut:
+
+                def on_room_io_subscribed(_: asyncio.Future[None]) -> None:
+                    if self._user_state == "listening" and self._agent_state == "listening":
+                        self._set_user_away_timer()
+
+                self._room_io.subscribed_fut.add_done_callback(on_room_io_subscribed)
 
     async def _trace_chat_ctx(self) -> None:
         if self._activity is None:
@@ -488,11 +494,26 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
 
         await self._activity.drain()
 
+    def _close_soon(
+        self,
+        *,
+        reason: CloseReason,
+        drain: bool = False,
+        error: llm.LLMError | stt.STTError | tts.TTSError | llm.RealtimeModelError | None = None,
+    ) -> None:
+        if self._closing_task:
+            return
+
+        self._closing_task = asyncio.create_task(
+            self._aclose_impl(error=error, drain=drain, reason=reason)
+        )
+
     @utils.log_exceptions(logger=logger)
     async def _aclose_impl(
         self,
         *,
         reason: CloseReason,
+        drain: bool = False,
         error: llm.LLMError | stt.STTError | tts.TTSError | llm.RealtimeModelError | None = None,
     ) -> None:
         async with self._lock:
@@ -500,13 +521,15 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
                 return
 
             if self._activity is not None:
-                try:
-                    await self._activity.interrupt()
-                except RuntimeError:
-                    # uninterruptible speech
-                    # TODO(long): force interrupt or wait for it to finish?
-                    # it might be an audio played from the error callback
-                    pass
+                if not drain:
+                    try:
+                        await self._activity.interrupt()
+                    except RuntimeError:
+                        # uninterruptible speech
+                        # TODO(long): force interrupt or wait for it to finish?
+                        # it might be an audio played from the error callback
+                        pass
+
                 await self._activity.drain()
 
                 # wait any uninterruptible speech to finish
@@ -531,6 +554,12 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
 
             self._started = False
             self.emit("close", CloseEvent(error=error, reason=reason))
+
+            self._cancel_user_away_timer()
+            self._user_state = "listening"
+            self._agent_state = "initializing"
+            self._llm_error_counts = 0
+            self._tts_error_counts = 0
 
         logger.debug("session closed", extra={"reason": reason.value, "error": error})
 
@@ -797,6 +826,14 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
     def _set_user_away_timer(self) -> None:
         self._cancel_user_away_timer()
         if self._opts.user_away_timeout is None:
+            return
+
+        if (
+            (room_io := self._room_io)
+            and room_io.subscribed_fut
+            and not room_io.subscribed_fut.done()
+        ):
+            # skip the timer before user join the room
             return
 
         self._user_away_timer = self._loop.call_later(

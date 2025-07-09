@@ -1,22 +1,14 @@
 from __future__ import annotations
 
-import json
-import functools
 import asyncio
-from dataclasses import dataclass
 import contextlib
-from collections.abc import Generator
-from typing import Any, Callable, Generic, Literal, TypeVar, Sequence
+from collections.abc import Generator, Sequence
+from typing import TYPE_CHECKING, Any, Callable
 
-from ..types import NOT_GIVEN, NotGivenOr
-from ..utils import is_given
 from .. import llm, utils
 
-
-from typing import TYPE_CHECKING
-
 if TYPE_CHECKING:
-    from .agent import Agent
+    pass
 
 
 class SpeechHandle:
@@ -44,11 +36,12 @@ class SpeechHandle:
         self._item_added_callbacks: set[Callable[[llm.ChatItem], None]] = set()
         self._done_callbacks: set[Callable[[SpeechHandle], None]] = set()
 
-        def _on_done(_):
+        def _on_done(_: asyncio.Future[None]) -> None:
             for cb in self._done_callbacks:
                 cb(self)
 
         self._done_fut.add_done_callback(_on_done)
+        self._maybe_run_final_output: Any = None  # kept private
 
     @staticmethod
     def create(

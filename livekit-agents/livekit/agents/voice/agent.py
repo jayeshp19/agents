@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from livekit import rtc
+from livekit.agents.voice.events import CloseReason
 
 from .. import llm, stt, tokenize, tts, utils, vad
 from ..llm import (
@@ -19,12 +20,12 @@ from ..log import logger
 from ..types import NOT_GIVEN, NotGivenOr
 from ..utils import is_given
 from .speech_handle import SpeechHandle
-from .run_result import RunResult
 
 if TYPE_CHECKING:
     from ..llm import mcp
     from .agent_activity import AgentActivity
     from .agent_session import AgentSession, TurnDetectionMode
+    from .io import TimedString
 
 
 @dataclass
@@ -48,6 +49,7 @@ class Agent:
         mcp_servers: NotGivenOr[list[mcp.MCPServer] | None] = NOT_GIVEN,
         allow_interruptions: NotGivenOr[bool] = NOT_GIVEN,
         min_consecutive_speech_delay: NotGivenOr[float] = NOT_GIVEN,
+        use_tts_aligned_transcript: NotGivenOr[bool] = NOT_GIVEN,
     ) -> None:
         tools = tools or []
         self._instructions = instructions
@@ -60,6 +62,7 @@ class Agent:
         self._vad = vad
         self._allow_interruptions = allow_interruptions
         self._min_consecutive_speech_delay = min_consecutive_speech_delay
+        self._use_tts_aligned_transcript = use_tts_aligned_transcript
 
         if isinstance(mcp_servers, list) and len(mcp_servers) == 0:
             mcp_servers = None  # treat empty list as None (but keep NOT_GIVEN)
@@ -241,8 +244,12 @@ class Agent:
         return Agent.default.llm_node(self, chat_ctx, tools, model_settings)
 
     def transcription_node(
-        self, text: AsyncIterable[str], model_settings: ModelSettings
-    ) -> AsyncIterable[str] | Coroutine[Any, Any, AsyncIterable[str]] | Coroutine[Any, Any, None]:
+        self, text: AsyncIterable[str | TimedString], model_settings: ModelSettings
+    ) -> (
+        AsyncIterable[str | TimedString]
+        | Coroutine[Any, Any, AsyncIterable[str | TimedString]]
+        | Coroutine[Any, Any, None]
+    ):
         """
         A node in the processing pipeline that finalizes transcriptions from text segments.
 
@@ -253,7 +260,7 @@ class Agent:
         You can override this node to customize post-processing logic according to your needs.
 
         Args:
-            text (AsyncIterable[str]): An asynchronous stream of text segments.
+            text (AsyncIterable[str | TimedString]): An asynchronous stream of text segments.
             model_settings (ModelSettings): Configuration and parameters for model execution.
 
         Yields:
@@ -264,7 +271,7 @@ class Agent:
     def tts_node(
         self, text: AsyncIterable[str], model_settings: ModelSettings
     ) -> (
-        AsyncGenerator[rtc.AudioFrame, None]
+        AsyncIterable[rtc.AudioFrame]
         | Coroutine[Any, Any, AsyncIterable[rtc.AudioFrame]]
         | Coroutine[Any, Any, None]
     ):
@@ -376,7 +383,8 @@ class Agent:
 
             if not activity.tts.capabilities.streaming:
                 wrapped_tts = tts.StreamAdapter(
-                    tts=wrapped_tts, sentence_tokenizer=tokenize.basic.SentenceTokenizer()
+                    tts=wrapped_tts,
+                    sentence_tokenizer=tokenize.blingfire.SentenceTokenizer(retain_format=True),
                 )
 
             conn_options = activity.session.conn_options.tts_conn_options
@@ -397,8 +405,8 @@ class Agent:
 
         @staticmethod
         async def transcription_node(
-            agent: Agent, text: AsyncIterable[str], model_settings: ModelSettings
-        ) -> AsyncGenerator[str, None]:
+            agent: Agent, text: AsyncIterable[str | TimedString], model_settings: ModelSettings
+        ) -> AsyncGenerator[str | TimedString, None]:
             """Default implementation for `Agent.transcription_node`"""
             async for delta in text:
                 yield delta
@@ -534,6 +542,20 @@ class Agent:
         return self._min_consecutive_speech_delay
 
     @property
+    def use_tts_aligned_transcript(self) -> NotGivenOr[bool]:
+        """
+        Indicates whether to use TTS-aligned transcript as the input of
+        the ``transcription_node``.
+
+        If this property was not set at Agent creation, but an ``AgentSession`` provides a value for
+        the use of TTS-aligned transcript, the session's value will be used at runtime instead.
+
+        Returns:
+            NotGivenOr[bool]: Whether to use TTS-aligned transcript.
+        """
+        return self._use_tts_aligned_transcript
+
+    @property
     def session(self) -> AgentSession:
         """
         Retrieve the VoiceAgent associated with the current agent.
@@ -576,10 +598,9 @@ class AgentTask(Agent, Generic[TaskResult_T]):
             allow_interruptions=allow_interruptions,
         )
 
+        self.__inline_mode = False
         self.__started = False
         self.__fut = asyncio.Future[TaskResult_T]()
-
-        self.__speech_handle: SpeechHandle | None = None
 
     def complete(self, result: TaskResult_T | Exception) -> None:
         if self.__fut.done():
@@ -590,10 +611,25 @@ class AgentTask(Agent, Generic[TaskResult_T]):
         else:
             self.__fut.set_result(result)
 
+        self.__fut.exception()  # silence exc not retrieved warnings
+
+        from .agent_activity import _AgentActivityContextVar, _SpeechHandleContextVar
+
+        speech_handle = _SpeechHandleContextVar.get(None)
+        activity = _AgentActivityContextVar.get()
+        session = activity.session
+
+        if speech_handle:
+            speech_handle._maybe_run_final_output = result
+
+        if not self.__inline_mode:
+            session._close_soon(reason=CloseReason.TASK_COMPLETED, drain=True)
+
     async def __await_impl(self) -> TaskResult_T:
         if self.__started:
             raise RuntimeError(f"{self.__class__.__name__} is not re-entrant, await only once")
 
+        self.__inline_mode = True
         self.__started = True
 
         current_task = asyncio.current_task()
@@ -650,24 +686,28 @@ class AgentTask(Agent, Generic[TaskResult_T]):
             # so handles added inside the on_enter will make sure we're not completing the run_state too early.
             run_state._mark_done_if_needed(None)
 
-        task_result = await asyncio.shield(self.__fut)
+        try:
+            return await asyncio.shield(self.__fut)
+        finally:
+            # run_state could have changed after self.__fut
+            run_state = session._global_run_state
 
-        # run_state could have changed after self.__fut
-        run_state = session._global_run_state
+            if session.current_agent != self:
+                logger.warning(
+                    f"{self.__class__.__name__} completed, but the agent has changed in the meantime. "
+                    "Ignoring handoff to the previous agent, likely due to `AgentSession.update_agent` being invoked."
+                )
+                await old_activity.aclose()
+            else:
+                if speech_handle and run_state and not run_state.done():
+                    run_state._watch_handle(speech_handle)
 
-        if session.current_agent != self:
-            logger.warning(
-                f"{self.__class__.__name__} completed, but the agent has changed in the meantime. "
-                "Ignoring handoff to the previous agent, likely due to `AgentSession.update_agent` being invoked."
-            )
-            await old_activity.aclose()
-            return task_result
-
-        if speech_handle and run_state and not run_state.done():
-            run_state._watch_handle(speech_handle)
-
-        await session._update_activity(old_agent, new_activity="resume")
-        return task_result
+                await old_agent.update_chat_ctx(
+                    old_agent.chat_ctx.merge(
+                        self.chat_ctx, exclude_function_call=True, exclude_instructions=True
+                    )
+                )
+                await session._update_activity(old_agent, new_activity="resume")
 
     def __await__(self) -> Generator[None, None, TaskResult_T]:
         return self.__await_impl().__await__()

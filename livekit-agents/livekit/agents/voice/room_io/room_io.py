@@ -216,7 +216,8 @@ class RoomIO:
                 audio_output := self._audio_output or self._agent_session.output.audio
             ):
                 self._tr_synchronizer = TranscriptSynchronizer(
-                    next_in_chain_audio=audio_output, next_in_chain_text=self._agent_tr_output
+                    next_in_chain_audio=audio_output,
+                    next_in_chain_text=self._agent_tr_output,
                 )
 
         # -- set the room event handlers --
@@ -310,6 +311,12 @@ class RoomIO:
         if not self._participant_available_fut.done():
             return None
         return self._participant_available_fut.result()
+
+    @property
+    def subscribed_fut(self) -> asyncio.Future[None] | None:
+        if self._audio_output:
+            return self._audio_output.subscribed
+        return None
 
     def set_participant(self, participant_identity: str | None) -> None:
         """Switch audio and video streams to specified participant"""
@@ -412,24 +419,17 @@ class RoomIO:
             and participant.disconnect_reason in DEFAULT_CLOSE_ON_DISCONNECT_REASONS
             and not self._close_session_atask
         ):
-
-            def _on_closed(_: asyncio.Task[None]) -> None:
-                self._close_session_atask = None
-
-                if self._close_session_atask is not None:
-                    return
-
-            logger.debug(
-                "closing agent session due to participant disconnect",
+            logger.info(
+                "closing agent session due to participant disconnect "
+                "(disable via `RoomInputOptions.close_on_disconnect=False`)",
                 extra={
                     "participant": participant.identity,
-                    "reason": rtc.DisconnectReason.Name(participant.disconnect_reason),
+                    "reason": rtc.DisconnectReason.Name(
+                        participant.disconnect_reason or rtc.DisconnectReason.UNKNOWN_REASON
+                    ),
                 },
             )
-            self._close_session_atask = asyncio.create_task(
-                self._agent_session._aclose_impl(reason=CloseReason.PARTICIPANT_DISCONNECTED)
-            )
-            self._close_session_atask.add_done_callback(_on_closed)
+            self._agent_session._close_soon(reason=CloseReason.PARTICIPANT_DISCONNECTED)
 
     def _on_user_input_transcribed(self, ev: UserInputTranscribedEvent) -> None:
         if self._user_transcript_atask:
@@ -477,10 +477,14 @@ class RoomIO:
         return _ParallelTextOutput(
             [
                 _ParticipantLegacyTranscriptionOutput(
-                    room=self._room, is_delta_stream=is_delta_stream, participant=participant
+                    room=self._room,
+                    is_delta_stream=is_delta_stream,
+                    participant=participant,
                 ),
                 _ParticipantTranscriptionOutput(
-                    room=self._room, is_delta_stream=is_delta_stream, participant=participant
+                    room=self._room,
+                    is_delta_stream=is_delta_stream,
+                    participant=participant,
                 ),
             ],
             next_in_chain=None,
@@ -494,6 +498,10 @@ class RoomIO:
 
         for sink in output._sinks:
             if isinstance(
-                sink, (_ParticipantLegacyTranscriptionOutput, _ParticipantTranscriptionOutput)
+                sink,
+                (
+                    _ParticipantLegacyTranscriptionOutput,
+                    _ParticipantTranscriptionOutput,
+                ),
             ):
                 sink.set_participant(participant_identity)
