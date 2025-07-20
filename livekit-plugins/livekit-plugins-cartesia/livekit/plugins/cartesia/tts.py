@@ -85,6 +85,7 @@ class TTS(tts.TTS):
         sample_rate: int = 24000,
         word_timestamps: bool = True,
         http_session: aiohttp.ClientSession | None = None,
+        tokenizer: NotGivenOr[tokenize.SentenceTokenizer] = NOT_GIVEN,
         base_url: str = "https://api.cartesia.ai",
     ) -> None:
         """
@@ -103,6 +104,7 @@ class TTS(tts.TTS):
             word_timestamps (bool, optional): Whether to add word timestamps to the output. Defaults to True.
             api_key (str, optional): The Cartesia API key. If not provided, it will be read from the CARTESIA_API_KEY environment variable.
             http_session (aiohttp.ClientSession | None, optional): An existing aiohttp ClientSession to use. If not provided, a new session will be created.
+            tokenizer (tokenize.SentenceTokenizer, optional): The tokenizer to use. Defaults to tokenize.basic.SentenceTokenizer(min_sentence_len=BUFFERED_WORDS_COUNT).
             base_url (str, optional): The base URL for the Cartesia API. Defaults to "https://api.cartesia.ai".
         """  # noqa: E501
 
@@ -145,6 +147,9 @@ class TTS(tts.TTS):
             mark_refreshed_on_get=True,
         )
         self._streams = weakref.WeakSet[SynthesizeStream]()
+        self._sentence_tokenizer = (
+            tokenizer if is_given(tokenizer) else tokenize.blingfire.SentenceTokenizer()
+        )
 
     async def _connect_ws(self, timeout: float) -> aiohttp.ClientWebSocketResponse:
         session = self._ensure_session()
@@ -232,7 +237,7 @@ class ChunkedStream(tts.ChunkedStream):
         self._opts = replace(tts._opts)
 
     async def _run(self, output_emitter: tts.AudioEmitter) -> None:
-        json = _to_cartesia_options(self._opts)
+        json = _to_cartesia_options(self._opts, streaming=False)
         json["transcript"] = self._input_text
 
         try:
@@ -272,7 +277,7 @@ class SynthesizeStream(tts.SynthesizeStream):
     def __init__(self, *, tts: TTS, conn_options: APIConnectOptions):
         super().__init__(tts=tts, conn_options=conn_options)
         self._tts: TTS = tts
-        self._sent_tokenizer_stream = tokenize.blingfire.SentenceTokenizer().stream()
+        self._sent_tokenizer_stream = tts._sentence_tokenizer.stream()
         self._opts = replace(tts._opts)
 
     async def _run(self, output_emitter: tts.AudioEmitter) -> None:
@@ -287,7 +292,7 @@ class SynthesizeStream(tts.SynthesizeStream):
 
         async def _sentence_stream_task(ws: aiohttp.ClientWebSocketResponse) -> None:
             context_id = utils.shortuuid()
-            base_pkt = _to_cartesia_options(self._opts)
+            base_pkt = _to_cartesia_options(self._opts, streaming=True)
             async for ev in self._sent_tokenizer_stream:
                 token_pkt = base_pkt.copy()
                 token_pkt["context_id"] = context_id
@@ -373,7 +378,7 @@ class SynthesizeStream(tts.SynthesizeStream):
             raise APIConnectionError() from e
 
 
-def _to_cartesia_options(opts: _TTSOptions) -> dict[str, Any]:
+def _to_cartesia_options(opts: _TTSOptions, *, streaming: bool) -> dict[str, Any]:
     voice: dict[str, Any] = {}
     if isinstance(opts.voice, str):
         voice["mode"] = "id"
@@ -392,7 +397,7 @@ def _to_cartesia_options(opts: _TTSOptions) -> dict[str, Any]:
     if voice_controls:
         voice["__experimental_controls"] = voice_controls
 
-    return {
+    options: dict[str, Any] = {
         "model_id": opts.model,
         "voice": voice,
         "output_format": {
@@ -401,5 +406,7 @@ def _to_cartesia_options(opts: _TTSOptions) -> dict[str, Any]:
             "sample_rate": opts.sample_rate,
         },
         "language": opts.language,
-        "add_timestamps": opts.word_timestamps,
     }
+    if streaming:
+        options["add_timestamps"] = opts.word_timestamps
+    return options

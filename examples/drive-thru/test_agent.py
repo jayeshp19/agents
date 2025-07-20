@@ -3,7 +3,6 @@ from __future__ import annotations
 import pytest
 
 from livekit.agents import AgentSession, ChatContext, llm
-from livekit.agents.llm.chat_context import ChatContext
 from livekit.agents.voice.run_result import mock_tools
 from livekit.plugins import openai
 
@@ -139,7 +138,7 @@ async def test_unavailable_item() -> None:
                 .is_message(role="assistant")
                 .judge(llm, intent="should inform the user that the coca cola is unavailable")
             )
-        except:
+        except AssertionError:
             result.expect.next_event().is_function_call(
                 name="order_regular_item", arguments={"item_id": "coca_cola", "size": "L"}
             )
@@ -263,5 +262,40 @@ async def test_conv():
             result.expect.next_event()
             .is_message(role="assistant")
             .judge(llm, intent="must confirm a Big Mac Combo meal was added/ordered")
+        )
+        result.expect.no_more_events()
+
+
+@pytest.mark.asyncio
+async def test_unknown_item():
+    userdata = await new_userdata()
+
+    # remove the hamburger
+    userdata.regular_items = [item for item in userdata.regular_items if item.id != "hamburger"]
+
+    async with _llm_model() as llm, AgentSession(llm=llm, userdata=userdata) as sess:
+        agent = DriveThruAgent(userdata=userdata)
+        await sess.start(agent)
+
+        result = await sess.run(user_input="Can I get an hamburger? No meal")
+        await (
+            result.expect.next_event()
+            .is_message(role="assistant")
+            .judge(
+                llm,
+                intent="should say a plain hamburger isn't something they have, or suggest something similar",
+            )
+        )
+        result.expect.no_more_events()
+
+    async with _llm_model() as llm, AgentSession(llm=llm, userdata=userdata) as sess:
+        agent = DriveThruAgent(userdata=userdata)
+        await sess.start(agent)
+
+        result = await sess.run(user_input="Can I get a redbull?")
+        await (
+            result.expect.next_event()
+            .is_message(role="assistant")
+            .judge(llm, intent="should say they don't have a redbull")
         )
         result.expect.no_more_events()
