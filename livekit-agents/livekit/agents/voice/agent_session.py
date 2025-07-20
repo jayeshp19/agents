@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import time
 from collections.abc import AsyncIterable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from types import TracebackType
 from typing import (
     TYPE_CHECKING,
@@ -16,13 +17,16 @@ from typing import (
     runtime_checkable,
 )
 
+from opentelemetry import context as otel_context, trace
+
 from livekit import rtc
 
-from .. import debug, llm, stt, tts, utils, vad
+from .. import llm, stt, tts, utils, vad
 from ..cli import cli
 from ..job import get_job_context
 from ..llm import ChatContext
 from ..log import logger
+from ..telemetry import trace_types, tracer
 from ..types import (
     DEFAULT_API_CONNECT_OPTIONS,
     NOT_GIVEN,
@@ -35,7 +39,6 @@ from .agent import Agent
 from .agent_activity import AgentActivity
 from .audio_recognition import _TurnDetector
 from .events import (
-    AgentEvent,
     AgentState,
     AgentStateChangedEvent,
     CloseEvent,
@@ -298,6 +301,12 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
 
         self._global_run_state: RunResult | None = None
 
+        # trace
+        self._user_speaking_span: trace.Span | None = None
+        self._agent_speaking_span: trace.Span | None = None
+        self._session_span: trace.Span | None = None
+        self._root_span_context: otel_context.Context | None = None
+
     @property
     def userdata(self) -> Userdata_T:
         if self._userdata is None:
@@ -365,6 +374,7 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
         self.generate_reply(user_input=user_input)
         return run_state
 
+    @tracer.start_as_current_span("agent_session", end_on_exit=False)
     async def start(
         self,
         agent: Agent,
@@ -386,6 +396,14 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
         async with self._lock:
             if self._started:
                 return
+
+            self._root_span_context = otel_context.get_current()
+            self._session_span = current_span = trace.get_current_span()
+            current_span = trace.get_current_span()
+            current_span.set_attribute(trace_types.ATTR_AGENT_NAME, agent.label)
+            current_span.set_attribute(
+                trace_types.ATTR_SESSION_OPTIONS, json.dumps(asdict(self._opts))
+            )
 
             self._agent = agent
             self._update_agent_state("initializing")
@@ -447,12 +465,14 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
             # session can be restarted, register the callbacks only once
             try:
                 job_ctx = get_job_context()
+                current_span.set_attribute(trace_types.ATTR_ROOM_NAME, job_ctx.room.name)
+                current_span.set_attribute(trace_types.ATTR_JOB_ID, job_ctx.job.id)
+                current_span.set_attribute(trace_types.ATTR_AGENT_NAME, job_ctx.job.agent_name)
                 if self._room_io:
                     # automatically connect to the room when room io is used
                     tasks.append(asyncio.create_task(job_ctx.connect(), name="_job_ctx_connect"))
 
                 if not self._job_context_cb_registered:
-                    job_ctx.add_tracing_callback(self._trace_chat_ctx)
                     job_ctx.add_shutdown_callback(
                         lambda: self._aclose_impl(reason=CloseReason.JOB_SHUTDOWN)
                     )
@@ -491,14 +511,6 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
                         self._set_user_away_timer()
 
                 self._room_io.subscribed_fut.add_done_callback(on_room_io_subscribed)
-
-    async def _trace_chat_ctx(self) -> None:
-        if self._activity is None:
-            return  # can happen at startup
-
-        chat_ctx = self._activity.agent.chat_ctx
-        debug.Tracing.store_kv("chat_ctx", chat_ctx.to_dict(exclude_function_call=False))
-        debug.Tracing.store_kv("history", self.history.to_dict(exclude_function_call=False))
 
     async def drain(self) -> None:
         if self._activity is None:
@@ -557,6 +569,14 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
                 await self._activity.aclose()
                 self._activity = None
 
+            if self._agent_speaking_span:
+                self._agent_speaking_span.end()
+                self._agent_speaking_span = None
+
+            if self._user_speaking_span:
+                self._user_speaking_span.end()
+                self._user_speaking_span = None
+
             if self._forward_audio_atask is not None:
                 await utils.aio.cancel_and_wait(self._forward_audio_atask)
 
@@ -565,6 +585,9 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
                 self._room_io = None
 
             self._started = False
+            if self._session_span:
+                self._session_span.end()
+                self._session_span = None
             self.emit("close", CloseEvent(error=error, reason=reason))
 
             self._cancel_user_away_timer()
@@ -572,18 +595,12 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
             self._agent_state = "initializing"
             self._llm_error_counts = 0
             self._tts_error_counts = 0
+            self._root_span_context = None
 
         logger.debug("session closed", extra={"reason": reason.value, "error": error})
 
     async def aclose(self) -> None:
         await self._aclose_impl(reason=CloseReason.USER_INITIATED)
-
-    def emit(self, event: EventTypes, ev: AgentEvent) -> None:  # type: ignore
-        # don't log VAD metrics as they are too verbose
-        if ev.type != "metrics_collected" or ev.metrics.type != "vad_metrics":
-            debug.Tracing.log_event(f'agent.on("{event}")', ev.model_dump())
-
-        return super().emit(event, ev)
 
     def update_options(self) -> None:
         pass
@@ -727,8 +744,8 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
             )
             run_state = self._global_run_state
             if run_state:
-                # don't mark the RunResult as done, if there is currently an agent transition happening.
-                # (used to make sure we're correctly adding the AgentHandoffResult before completion)
+                # don't mark the RunResult as done, if there is currently an agent transition happening.  # noqa: E501
+                # (used to make sure we're correctly adding the AgentHandoffResult before completion)  # noqa: E501
                 run_state._watch_handle(task)
 
     async def _update_activity(
@@ -784,6 +801,11 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
 
     @utils.log_exceptions(logger=logger)
     async def _update_activity_task(self, task: Agent) -> None:
+        if self._root_span_context is not None:
+            # restore the root span context so on_exit, on_enter, and future turns
+            # are direct children of the root span, not nested under a tool call.
+            otel_context.attach(self._root_span_context)
+
         await self._update_activity(task)
 
     def _on_error(
@@ -865,6 +887,14 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
             self._llm_error_counts = 0
             self._tts_error_counts = 0
 
+            if self._agent_speaking_span is None:
+                self._agent_speaking_span = tracer.start_span("agent_speaking")
+                self._agent_speaking_span.set_attribute(trace_types.ATTR_START_TIME, time.time())
+        elif self._agent_speaking_span is not None:
+            self._agent_speaking_span.set_attribute(trace_types.ATTR_END_TIME, time.time())
+            self._agent_speaking_span.end()
+            self._agent_speaking_span = None
+
         if state == "listening" and self._user_state == "listening":
             self._set_user_away_timer()
         else:
@@ -877,9 +907,20 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
             AgentStateChangedEvent(old_state=old_state, new_state=state),
         )
 
-    def _update_user_state(self, state: UserState) -> None:
+    def _update_user_state(
+        self, state: UserState, *, last_speaking_time: float | None = None
+    ) -> None:
         if self._user_state == state:
             return
+
+        if state == "speaking" and self._user_speaking_span is None:
+            self._user_speaking_span = tracer.start_span("user_speaking")
+            self._user_speaking_span.set_attribute(trace_types.ATTR_START_TIME, time.time())
+        elif self._user_speaking_span is not None:
+            end_time = last_speaking_time or time.time()
+            self._user_speaking_span.set_attribute(trace_types.ATTR_END_TIME, end_time)
+            self._user_speaking_span.end(end_time=int(end_time * 1_000_000_000))  # nanoseconds
+            self._user_speaking_span = None
 
         if state == "listening" and self._agent_state == "listening":
             self._set_user_away_timer()
