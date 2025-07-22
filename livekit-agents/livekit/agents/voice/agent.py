@@ -631,7 +631,12 @@ class AgentTask(Agent, Generic[TaskResult_T]):
             speech_handle._maybe_run_final_output = result
 
         if not self.__inline_mode:
+            logger.info(f"AgentTask completing - closing session {session}")
             session._close_soon(reason=CloseReason.TASK_COMPLETED, drain=True)
+        else:
+            logger.info(f"AgentTask completing in inline mode - session {session}")
+
+        logger.info(f"AgentTask completed - session {session}")
 
     async def __await_impl(self) -> TaskResult_T:
         if self.__started:
@@ -639,6 +644,8 @@ class AgentTask(Agent, Generic[TaskResult_T]):
 
         self.__inline_mode = True
         self.__started = True
+
+        logger.info(f"AgentTask {self.__class__.__name__} starting await implementation")
 
         current_task = asyncio.current_task()
         if current_task is None:
@@ -680,10 +687,16 @@ class AgentTask(Agent, Generic[TaskResult_T]):
         old_agent = old_activity.agent
         session = old_activity.session
 
+        logger.info(
+            f"AgentTask {self.__class__.__name__} switching session activity from {old_agent.__class__.__name__} to {self.__class__.__name__}"
+        )
+
         # TODO(theomonnom): could the RunResult watcher & the blocked_tasks share the same logic?
         await session._update_activity(
             self, previous_activity="pause", blocked_tasks=[current_task]
         )
+
+        logger.info(f"AgentTask {self.__class__.__name__} activity switched, calling on_enter")
 
         # NOTE: _update_activity is calling the on_enter method, so the RunResult can capture all speeches
         run_state = session._global_run_state
@@ -694,9 +707,15 @@ class AgentTask(Agent, Generic[TaskResult_T]):
             # so handles added inside the on_enter will make sure we're not completing the run_state too early.
             run_state._mark_done_if_needed(None)
 
+        logger.info(f"AgentTask {self.__class__.__name__} waiting for completion")
         try:
-            return await asyncio.shield(self.__fut)
+            result = await asyncio.shield(self.__fut)
+            logger.info(
+                f"AgentTask {self.__class__.__name__} completed with result type: {type(result)}"
+            )
+            return result
         finally:
+            logger.info(f"AgentTask {self.__class__.__name__} entering finally block")
             # run_state could have changed after self.__fut
             run_state = session._global_run_state
 
@@ -707,15 +726,28 @@ class AgentTask(Agent, Generic[TaskResult_T]):
                 )
                 await old_activity.aclose()
             else:
+                logger.info(
+                    f"AgentTask {self.__class__.__name__} switching back to {old_agent.__class__.__name__}"
+                )
                 if speech_handle and run_state and not run_state.done():
+                    logger.info(f"AgentTask {self.__class__.__name__} re-watching speech handle")
                     run_state._watch_handle(speech_handle)
 
+                logger.info(
+                    f"AgentTask {self.__class__.__name__} updating chat context for {old_agent.__class__.__name__}"
+                )
                 await old_agent.update_chat_ctx(
                     old_agent.chat_ctx.merge(
                         self.chat_ctx, exclude_function_call=True, exclude_instructions=True
                     )
                 )
+                logger.info(
+                    f"AgentTask {self.__class__.__name__} chat context updated, calling session._update_activity"
+                )
                 await session._update_activity(old_agent, new_activity="resume")
+                logger.info(
+                    f"AgentTask {self.__class__.__name__} successfully switched back to {old_agent.__class__.__name__}"
+                )
 
     def __await__(self) -> Generator[None, None, TaskResult_T]:
         return self.__await_impl().__await__()

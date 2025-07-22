@@ -1,7 +1,7 @@
 {
     "conversation_flow_id": "conversation_flow_5f56baba12d1",
     "version": 0,
-    "global_prompt": "You're Myra, Retell Delivery's support.\n\nYou can help user with checking their order and refund for a previous purchase. You cannot help with tasks other than those.\n\nYou operate in a call, and the user text might contain transcription error. Do your best to guess and understand. Ask for clarifying questions if needed.",
+    "global_prompt": "You're Myra, Retell Delivery's support.\n\nYou can help user with checking their order, refund for a previous purchase, updating delivery preferences, scheduling delivery, and account verification. You cannot help with tasks other than those.\n\nYou operate in a call, and the user text might contain transcription error. Do your best to guess and understand. Ask for clarifying questions if needed.",
     "nodes": [
         {
             "instruction": {
@@ -83,6 +83,69 @@
             }
         },
         {
+            "name": "Update Delivery Preferences",
+            "edges": [
+                {
+                    "condition": "user wants to update address",
+                    "id": "edge-update-address",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "user wants to update delivery address"
+                    },
+                    "destination_node_id": "node-gather-address"
+                },
+                {
+                    "condition": "user wants to schedule delivery",
+                    "id": "edge-schedule-delivery",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "user wants to schedule a delivery time"
+                    },
+                    "destination_node_id": "node-gather-delivery-schedule"
+                }
+            ],
+            "global_node_setting": {
+                "condition": "User wants to update delivery preferences, change address, or schedule delivery"
+            },
+            "id": "node-delivery-preferences",
+            "type": "conversation",
+            "display_position": {
+                "x": 1500,
+                "y": 400
+            },
+            "instruction": {
+                "type": "prompt",
+                "text": "I can help you update your delivery preferences. Would you like to update your delivery address or schedule a specific delivery time?"
+            }
+        },
+        {
+            "name": "Account Verification",
+            "edges": [
+                {
+                    "condition": "user needs account verification",
+                    "id": "edge-verify-account",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "user needs to verify their account"
+                    },
+                    "destination_node_id": "node-gather-verification"
+                }
+            ],
+            "global_node_setting": {
+                "condition": "User needs account verification or has account security issues"
+            },
+            "id": "node-account-verification",
+            "type": "conversation",
+            "display_position": {
+                "x": 2000,
+                "y": 400
+            },
+            "instruction": {
+                "type": "prompt",
+                "text": "I'll help you verify your account. I'll need to collect some information to confirm your identity."
+            }
+        },
+        {
             "tool_id": "tool-1735258495443",
             "name": "Refund",
             "edges": [
@@ -108,10 +171,109 @@
             "id": "node-1735258497049",
             "type": "function",
             "tool_type": "local",
-            "speak_during_execution": false,
+            "speak_during_execution": true,
             "display_position": {
                 "x": 1000,
                 "y": 567
+            },
+            "wait_for_result": true
+        },
+        {
+            "tool_id": "tool-address-update",
+            "name": "Update Address Function",
+            "edges": [
+                {
+                    "condition": "address update successful",
+                    "id": "edge-address-success",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "address update successful"
+                    },
+                    "destination_node_id": "node-address-confirmation"
+                },
+                {
+                    "condition": "address update failed",
+                    "id": "edge-address-failure",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "address update failed"
+                    },
+                    "destination_node_id": "node-1736564247278"
+                }
+            ],
+            "id": "node-function-address-update",
+            "type": "function",
+            "tool_type": "local",
+            "speak_during_execution": true,
+            "display_position": {
+                "x": 1200,
+                "y": 800
+            },
+            "wait_for_result": true
+        },
+        {
+            "tool_id": "tool-delivery-schedule",
+            "name": "Schedule Delivery Function",
+            "edges": [
+                {
+                    "condition": "scheduling successful",
+                    "id": "edge-schedule-success",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "delivery scheduling successful"
+                    },
+                    "destination_node_id": "node-schedule-confirmation"
+                },
+                {
+                    "condition": "scheduling failed",
+                    "id": "edge-schedule-failure",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "delivery scheduling failed"
+                    },
+                    "destination_node_id": "node-1736564247278"
+                }
+            ],
+            "id": "node-function-schedule-delivery",
+            "type": "function",
+            "tool_type": "local",
+            "speak_during_execution": false,
+            "display_position": {
+                "x": 1400,
+                "y": 1000
+            },
+            "wait_for_result": true
+        },
+        {
+            "tool_id": "tool-account-verification",
+            "name": "Verify Account Function",
+            "edges": [
+                {
+                    "condition": "verification successful",
+                    "id": "edge-verification-success",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "account verification successful"
+                    },
+                    "destination_node_id": "node-verification-success"
+                },
+                {
+                    "condition": "verification failed",
+                    "id": "edge-verification-failure",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "account verification failed"
+                    },
+                    "destination_node_id": "node-verification-failure"
+                }
+            ],
+            "id": "node-function-account-verification",
+            "type": "function",
+            "tool_type": "local",
+            "speak_during_execution": true,
+            "display_position": {
+                "x": 2200,
+                "y": 800
             },
             "wait_for_result": true
         },
@@ -188,7 +350,7 @@
             "wait_for_result": true
         },
         {
-            "name": "Conversation",
+            "name": "Order Status Response",
             "edges": [
                 {
                     "condition": "user has no more questions",
@@ -212,7 +374,7 @@
             }
         },
         {
-            "name": "Conversation",
+            "name": "Refund Success Response",
             "edges": [
                 {
                     "condition": "No more help needed",
@@ -236,11 +398,116 @@
             }
         },
         {
+            "name": "Address Update Confirmation",
+            "edges": [
+                {
+                    "condition": "user is satisfied",
+                    "id": "edge-address-done",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "user is satisfied with address update"
+                    },
+                    "destination_node_id": "node-1736565126113"
+                }
+            ],
+            "id": "node-address-confirmation",
+            "type": "conversation",
+            "display_position": {
+                "x": 1600,
+                "y": 800
+            },
+            "instruction": {
+                "type": "prompt",
+                "text": "Great! I've successfully updated your delivery address. Your future orders will be delivered to the new address. Is there anything else I can help you with?"
+            }
+        },
+        {
+            "name": "Schedule Confirmation",
+            "edges": [
+                {
+                    "condition": "user is satisfied",
+                    "id": "edge-schedule-done",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "user is satisfied with delivery schedule"
+                    },
+                    "destination_node_id": "node-1736565126113"
+                }
+            ],
+            "id": "node-schedule-confirmation",
+            "type": "conversation",
+            "display_position": {
+                "x": 1800,
+                "y": 1000
+            },
+            "instruction": {
+                "type": "prompt",
+                "text": "Perfect! I've scheduled your delivery for the requested time. You'll receive a confirmation text message shortly. Is there anything else I can help you with?"
+            }
+        },
+        {
+            "name": "Verification Success",
+            "edges": [
+                {
+                    "condition": "user needs more help",
+                    "id": "edge-verification-complete",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "user needs more help after verification"
+                    },
+                    "destination_node_id": "node-1736565126113"
+                }
+            ],
+            "id": "node-verification-success",
+            "type": "conversation",
+            "display_position": {
+                "x": 2600,
+                "y": 800
+            },
+            "instruction": {
+                "type": "prompt",
+                "text": "Excellent! Your account has been successfully verified. Your account security is now fully updated. How else can I assist you today?"
+            }
+        },
+        {
+            "name": "Verification Failure",
+            "edges": [
+                {
+                    "condition": "user wants to try again",
+                    "id": "edge-verification-retry",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "user wants to retry verification"
+                    },
+                    "destination_node_id": "node-gather-verification"
+                },
+                {
+                    "condition": "user wants human help",
+                    "id": "edge-verification-human",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "user wants to speak to a human"
+                    },
+                    "destination_node_id": "node-1736564414014"
+                }
+            ],
+            "id": "node-verification-failure",
+            "type": "conversation",
+            "display_position": {
+                "x": 2600,
+                "y": 600
+            },
+            "instruction": {
+                "type": "prompt",
+                "text": "I'm sorry, but the verification information doesn't match our records. Would you like to try again, or would you prefer to speak with a human agent?"
+            }
+        },
+        {
             "instruction": {
                 "type": "static_text",
                 "text": "It seems like there some technical issues with our system right now, let me transfer you to our representative to help further. Please hold on."
             },
-            "name": "Conversation",
+            "name": "System Error",
             "edges": [
                 {
                     "condition": "Describe the transition condition",
@@ -267,7 +534,223 @@
             }
         },
         {
-            "name": "Conversation",
+            "name": "Gather Customer Information",
+            "edges": [
+                {
+                    "condition": "all required information collected",
+                    "id": "edge-gather-complete",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "all required information collected"
+                    },
+                    "destination_node_id": "node-1735258497049"
+                }
+            ],
+            "id": "node-gather-input-123456",
+            "type": "gather_input",
+            "display_position": {
+                "x": 750,
+                "y": 528
+            },
+            "gather_input_variables": [
+                {
+                    "name": "customer_name",
+                    "type": "string",
+                    "description": "customer's full name",
+                    "required": true,
+                    "regex_pattern": "^[A-Za-z\\s]{2,50}$",
+                    "regex_error_message": "Name must be 2-50 characters and contain only letters and spaces"
+                },
+                {
+                    "name": "email_address",
+                    "type": "email",
+                    "description": "customer's email address",
+                    "required": true
+                },
+                {
+                    "name": "phone_number",
+                    "type": "phone",
+                    "description": "customer's phone number",
+                    "required": false,
+                    "regex_pattern": "^\\+?[1-9]\\d{1,14}$",
+                    "regex_error_message": "Please provide a valid phone number with country code"
+                },
+                {
+                    "name": "order_id",
+                    "type": "string",
+                    "description": "order ID for the refund",
+                    "required": true,
+                    "regex_pattern": "^[A-Z0-9]{8,12}$",
+                    "regex_error_message": "Order ID must be 8-12 characters containing only uppercase letters and numbers"
+                }
+            ],
+            "gather_input_instruction": "I need to collect some information to process your refund request. This will help me verify your account and locate your order."
+        },
+        {
+            "name": "Gather Address Information",
+            "edges": [
+                {
+                    "condition": "address information collected",
+                    "id": "edge-address-gathered",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "address information collected"
+                    },
+                    "destination_node_id": "node-function-address-update"
+                }
+            ],
+            "id": "node-gather-address",
+            "type": "gather_input",
+            "display_position": {
+                "x": 1000,
+                "y": 600
+            },
+            "gather_input_variables": [
+                {
+                    "name": "street_address",
+                    "type": "string",
+                    "description": "street address including house number",
+                    "required": true,
+                    "regex_pattern": "^[0-9]+\\s+[A-Za-z0-9\\s.,#-]+$",
+                    "regex_error_message": "Please provide a complete street address starting with house number"
+                },
+                {
+                    "name": "city",
+                    "type": "string",
+                    "description": "city name",
+                    "required": true,
+                    "regex_pattern": "^[A-Za-z\\s.'-]{2,50}$",
+                    "regex_error_message": "City name must be 2-50 characters and contain only letters, spaces, periods, apostrophes, and hyphens"
+                },
+                {
+                    "name": "state",
+                    "type": "string",
+                    "description": "state or province",
+                    "required": true,
+                    "regex_pattern": "^[A-Z]{2}$",
+                    "regex_error_message": "Please provide the two-letter state code (e.g., CA, NY, TX)"
+                },
+                {
+                    "name": "zip_code",
+                    "type": "string",
+                    "description": "postal code or zip code",
+                    "required": true,
+                    "regex_pattern": "^[0-9]{5}(-[0-9]{4})?$",
+                    "regex_error_message": "ZIP code must be 5 digits or 5+4 format (e.g., 12345 or 12345-6789)"
+                },
+                {
+                    "name": "apartment_unit",
+                    "type": "string",
+                    "description": "apartment or unit number",
+                    "required": false,
+                    "regex_pattern": "^[A-Za-z0-9#\\s-]{1,10}$",
+                    "regex_error_message": "Unit number must be 1-10 characters"
+                }
+            ],
+            "gather_input_instruction": "I'll need your new delivery address. Please provide the complete address including street, city, state, and ZIP code."
+        },
+        {
+            "name": "Gather Delivery Schedule",
+            "edges": [
+                {
+                    "condition": "schedule information collected",
+                    "id": "edge-schedule-gathered",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "delivery schedule information collected"
+                    },
+                    "destination_node_id": "node-function-schedule-delivery"
+                }
+            ],
+            "id": "node-gather-delivery-schedule",
+            "type": "gather_input",
+            "display_position": {
+                "x": 1200,
+                "y": 800
+            },
+            "gather_input_variables": [
+                {
+                    "name": "preferred_date",
+                    "type": "date",
+                    "description": "preferred delivery date",
+                    "required": true,
+                    "regex_pattern": "^(0[1-9]|1[0-2])/(0[1-9]|[12][0-9]|3[01])/\\d{4}$",
+                    "regex_error_message": "Please provide date in MM/DD/YYYY format"
+                },
+                {
+                    "name": "time_preference",
+                    "type": "string",
+                    "description": "preferred delivery time window",
+                    "required": true,
+                    "regex_pattern": "^(morning|afternoon|evening|9am-12pm|12pm-3pm|3pm-6pm|6pm-9pm)$",
+                    "regex_error_message": "Please choose: morning, afternoon, evening, or specific time slots (9am-12pm, 12pm-3pm, 3pm-6pm, 6pm-9pm)"
+                },
+                {
+                    "name": "special_instructions",
+                    "type": "string",
+                    "description": "special delivery instructions",
+                    "required": false,
+                    "regex_pattern": "^[A-Za-z0-9\\s.,!?'-]{0,200}$",
+                    "regex_error_message": "Instructions must be under 200 characters"
+                }
+            ],
+            "gather_input_instruction": "I'll help you schedule your delivery. Please let me know your preferred date and time window."
+        },
+        {
+            "name": "Gather Account Verification",
+            "edges": [
+                {
+                    "condition": "verification information collected",
+                    "id": "edge-verification-gathered",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "account verification information collected"
+                    },
+                    "destination_node_id": "node-function-account-verification"
+                }
+            ],
+            "id": "node-gather-verification",
+            "type": "gather_input",
+            "display_position": {
+                "x": 2000,
+                "y": 600
+            },
+            "gather_input_variables": [
+                {
+                    "name": "account_email",
+                    "type": "email",
+                    "description": "email address associated with your account",
+                    "required": true
+                },
+                {
+                    "name": "last_four_ssn",
+                    "type": "string",
+                    "description": "last four digits of your social security number",
+                    "required": true,
+                    "regex_pattern": "^[0-9]{4}$",
+                    "regex_error_message": "Please provide exactly 4 digits"
+                },
+                {
+                    "name": "birth_month",
+                    "type": "number",
+                    "description": "your birth month (1-12)",
+                    "required": true,
+                    "regex_pattern": "^(0?[1-9]|1[0-2])$",
+                    "regex_error_message": "Please provide a valid month number (1-12)"
+                },
+                {
+                    "name": "security_question_answer",
+                    "type": "string",
+                    "description": "answer to your security question",
+                    "required": false,
+                    "regex_pattern": "^[A-Za-z0-9\\s.,'-]{2,50}$",
+                    "regex_error_message": "Answer must be 2-50 characters"
+                }
+            ],
+            "gather_input_instruction": "For security purposes, I need to verify your identity. I'll need your account email, last four digits of your SSN, and birth month."
+        },
+        {
+            "name": "Refund Information Collection",
             "edges": [
                 {
                     "condition": "order id obtained",
@@ -276,7 +759,7 @@
                         "type": "prompt",
                         "prompt": "order id obtained"
                     },
-                    "destination_node_id": "node-1735258497049"
+                    "destination_node_id": "node-gather-input-123456"
                 }
             ],
             "id": "node-1736564330428",
@@ -287,7 +770,7 @@
             },
             "instruction": {
                 "type": "prompt",
-                "text": "ask user for the order id that they want to refund for."
+                "text": "Tell the user you'll need to collect some information to process their refund request."
             }
         },
         {
@@ -295,7 +778,7 @@
                 "type": "prompt",
                 "text": "Tell user you will need to involve your supervisor to help with their request, and you are transferring the call"
             },
-            "name": "Conversation",
+            "name": "Transfer to Supervisor",
             "edges": [
                 {
                     "condition": "Describe the transition condition",
@@ -326,7 +809,7 @@
                 "type": "prompt",
                 "text": "Politely say goodbye"
             },
-            "name": "Conversation",
+            "name": "Goodbye",
             "edges": [
                 {
                     "condition": "Describe the transition condition",
@@ -359,7 +842,7 @@
     "tools": [
         {
             "name": "refund_order",
-            "description": "",
+            "description": "Process a refund for a customer order",
             "tool_id": "tool-1735258495443",
             "type": "custom",
             "parameters": {
@@ -368,13 +851,29 @@
                     "order_id": {
                         "type": "string",
                         "description": "The id of the order to refund."
+                    },
+                    "customer_name": {
+                        "type": "string",
+                        "description": "The customer's name"
+                    },
+                    "email_address": {
+                        "type": "string",
+                        "description": "The customer's email address"
                     }
                 },
                 "required": [
-                    "order_id"
+                    "order_id",
+                    "customer_name",
+                    "email_address"
                 ]
             },
-            "url": "https://api.retellai.com/random_status"
+            "url": "https://httpbin.org/anything",
+            "http_method": "POST",
+            "headers": {
+                "Content-Type": "application/json",
+                "Authorization": "Bearer test-key"
+            },
+            "timeout_ms": 30000
         },
         {
             "name": "check_order",
@@ -393,7 +892,130 @@
                     "order_id"
                 ]
             },
-            "url": "https://api.retellai.com/var_test"
+            "url": "https://httpbin.org/anything",
+            "http_method": "GET",
+            "headers": {
+                "Authorization": "Bearer test-key"
+            },
+            "timeout_ms": 15000
+        },
+        {
+            "name": "update_address",
+            "description": "Update customer delivery address",
+            "tool_id": "tool-address-update",
+            "type": "custom",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "street_address": {
+                        "type": "string",
+                        "description": "Street address including house number"
+                    },
+                    "city": {
+                        "type": "string",
+                        "description": "City name"
+                    },
+                    "state": {
+                        "type": "string",
+                        "description": "State code"
+                    },
+                    "zip_code": {
+                        "type": "string",
+                        "description": "ZIP code"
+                    },
+                    "apartment_unit": {
+                        "type": "string",
+                        "description": "Apartment or unit number (optional)"
+                    }
+                },
+                "required": [
+                    "street_address",
+                    "city",
+                    "state",
+                    "zip_code"
+                ]
+            },
+            "url": "https://httpbin.org/anything",
+            "http_method": "PUT",
+            "headers": {
+                "Content-Type": "application/json",
+                "Authorization": "Bearer test-key"
+            },
+            "timeout_ms": 20000
+        },
+        {
+            "name": "schedule_delivery",
+            "description": "Schedule delivery for a specific date and time",
+            "tool_id": "tool-delivery-schedule",
+            "type": "custom",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "preferred_date": {
+                        "type": "string",
+                        "description": "Preferred delivery date in MM/DD/YYYY format"
+                    },
+                    "time_preference": {
+                        "type": "string",
+                        "description": "Preferred time window for delivery"
+                    },
+                    "special_instructions": {
+                        "type": "string",
+                        "description": "Special delivery instructions (optional)"
+                    }
+                },
+                "required": [
+                    "preferred_date",
+                    "time_preference"
+                ]
+            },
+            "url": "https://httpbin.org/anything",
+            "http_method": "POST",
+            "headers": {
+                "Content-Type": "application/json",
+                "Authorization": "Bearer test-key"
+            },
+            "timeout_ms": 25000
+        },
+        {
+            "name": "verify_account",
+            "description": "Verify customer account using provided information",
+            "tool_id": "tool-account-verification",
+            "type": "custom",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "account_email": {
+                        "type": "string",
+                        "description": "Email address associated with the account"
+                    },
+                    "last_four_ssn": {
+                        "type": "string",
+                        "description": "Last four digits of SSN"
+                    },
+                    "birth_month": {
+                        "type": "number",
+                        "description": "Birth month (1-12)"
+                    },
+                    "security_question_answer": {
+                        "type": "string",
+                        "description": "Answer to security question (optional)"
+                    }
+                },
+                "required": [
+                    "account_email",
+                    "last_four_ssn",
+                    "birth_month"
+                ]
+            },
+            "url": "https://httpbin.org/anything",
+            "http_method": "POST",
+            "headers": {
+                "Content-Type": "application/json",
+                "Authorization": "Bearer test-key",
+                "X-Security-Level": "high"
+            },
+            "timeout_ms": 10000
         }
     ],
     "model_choice": {

@@ -784,7 +784,11 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
             self._next_activity = None
 
             run_state = self._global_run_state
+            print(f"run_state: {run_state}")
             if run_state:
+                print(f"previous_activity_v: {previous_activity_v}")
+                print(f"self._activity: {self._activity}")
+                print(f"self._activity.agent: {self._activity.agent}")
                 run_state._agent_handoff(
                     old_agent=previous_activity_v.agent if previous_activity_v else None,
                     new_agent=self._activity.agent,
