@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from livekit import rtc
-from livekit.agents.voice.events import CloseReason
 
 from .. import llm, stt, tokenize, tts, utils, vad
 from ..llm import (
@@ -606,9 +605,11 @@ class AgentTask(Agent, Generic[TaskResult_T]):
             allow_interruptions=allow_interruptions,
         )
 
-        self.__inline_mode = False
         self.__started = False
         self.__fut = asyncio.Future[TaskResult_T]()
+
+    def done(self) -> bool:
+        return self.__fut.done()
 
     def complete(self, result: TaskResult_T | Exception) -> None:
         if self.__fut.done():
@@ -621,28 +622,20 @@ class AgentTask(Agent, Generic[TaskResult_T]):
 
         self.__fut.exception()  # silence exc not retrieved warnings
 
-        from .agent_activity import _AgentActivityContextVar, _SpeechHandleContextVar
+        from .agent_activity import _SpeechHandleContextVar
 
         speech_handle = _SpeechHandleContextVar.get(None)
-        activity = _AgentActivityContextVar.get()
-        session = activity.session
 
         if speech_handle:
             speech_handle._maybe_run_final_output = result
 
-        if not self.__inline_mode:
-            logger.info(f"AgentTask completing - closing session {session}")
-            session._close_soon(reason=CloseReason.TASK_COMPLETED, drain=True)
-        else:
-            logger.info(f"AgentTask completing in inline mode - session {session}")
-
-        logger.info(f"AgentTask completed - session {session}")
+        # if not self.__inline_mode:
+        #    session._close_soon(reason=CloseReason.TASK_COMPLETED, drain=True)
 
     async def __await_impl(self) -> TaskResult_T:
         if self.__started:
             raise RuntimeError(f"{self.__class__.__name__} is not re-entrant, await only once")
 
-        self.__inline_mode = True
         self.__started = True
 
         logger.info(f"AgentTask {self.__class__.__name__} starting await implementation")
@@ -709,11 +702,8 @@ class AgentTask(Agent, Generic[TaskResult_T]):
 
         logger.info(f"AgentTask {self.__class__.__name__} waiting for completion")
         try:
-            result = await asyncio.shield(self.__fut)
-            logger.info(
-                f"AgentTask {self.__class__.__name__} completed with result type: {type(result)}"
-            )
-            return result
+            return await asyncio.shield(self.__fut)
+
         finally:
             logger.info(f"AgentTask {self.__class__.__name__} entering finally block")
             # run_state could have changed after self.__fut
@@ -741,9 +731,7 @@ class AgentTask(Agent, Generic[TaskResult_T]):
                         self.chat_ctx, exclude_function_call=True, exclude_instructions=True
                     )
                 )
-                logger.info(
-                    f"AgentTask {self.__class__.__name__} chat context updated, calling session._update_activity"
-                )
+
                 await session._update_activity(old_agent, new_activity="resume")
                 logger.info(
                     f"AgentTask {self.__class__.__name__} successfully switched back to {old_agent.__class__.__name__}"
