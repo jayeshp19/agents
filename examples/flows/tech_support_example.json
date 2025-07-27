@@ -87,13 +87,15 @@
             "gather_input_variables": [
                 {
                     "name": "email",
-                    "type": "string",
-                    "description": "Customer's email address"
+                    "type": "email",
+                    "description": "Customer's email address",
+                    "required": true
                 },
                 {
                     "name": "account_number",
                     "type": "string",
-                    "description": "Account number (if customer volunteers it)"
+                    "description": "Account number (if customer volunteers it)",
+                    "required": false
                 }
             ],
             "edges": [
