@@ -7,6 +7,7 @@ tools, and the complete flow specification.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -19,6 +20,8 @@ from .fields import (
     TransferDestination,
     TransferOption,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -77,6 +80,40 @@ class Node:
     def __post_init__(self):
         if not self.id.strip():
             raise ValueError("Node ID cannot be empty")
+
+        # Node-specific validation
+        if self.type == "function":
+            # Function nodes MUST have edges to handle success/failure
+            if not self.edges or len(self.edges) == 0:
+                raise ValueError(
+                    f"Function node '{self.id}' must have at least one edge to handle results. "
+                    "Consider adding edges for success/failure conditions."
+                )
+
+        elif self.type == "gather_input":
+            # Gather nodes MUST have exactly one edge (automatic transition)
+            if not self.edges or len(self.edges) == 0:
+                raise ValueError(
+                    f"Gather input node '{self.id}' must have exactly one edge. "
+                    "Gather nodes transition automatically when all required data is collected."
+                )
+            elif len(self.edges) > 1:
+                logger.warning(
+                    f"Gather input node '{self.id}' has {len(self.edges)} edges. "
+                    "Only the first edge will be used for automatic transition."
+                )
+
+        elif self.type == "conversation":
+            # Conversation nodes can have 0 edges (rely on global transitions)
+            pass
+
+        elif self.type == "end":
+            # End nodes should not have edges
+            if self.edges and len(self.edges) > 0:
+                logger.warning(
+                    f"End node '{self.id}' has {len(self.edges)} edges. "
+                    "End nodes should not have outgoing edges."
+                )
         if not self.name.strip():
             raise ValueError("Node name cannot be empty")
 
@@ -100,6 +137,10 @@ class Node:
             raise ValueError("Function nodes must have a tool_id")
         if self.type == NodeType.GATHER_INPUT and not self.gather_input_variables:
             raise ValueError("Gather input nodes must have variables")
+        if self.type == NodeType.GATHER_INPUT and len(self.edges) > 1:
+            raise ValueError("Gather input nodes can only have one exit edge")
+        if self.type == NodeType.GATHER_INPUT and len(self.edges) == 0:
+            raise ValueError("Gather input nodes must have exactly one exit edge")
 
     def validate_edges(self, available_node_ids: set[str]) -> list[str]:
         """Validate that all edge destinations point to valid nodes.
@@ -345,7 +386,6 @@ class FlowSpec:
     start_speaker: SpeakerType | str | None = None
     tools: dict[str, ToolSpec] = field(default_factory=dict)
     model_choice: dict[str, Any] | None = None
-    # Additional top-level fields
     begin_tag_display_position: dict[str, Any] | None = None
     is_published: bool | None = None
 

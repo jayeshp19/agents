@@ -1,42 +1,17 @@
-"""
-Field-level dataclass definitions for conversation flow schema.
-
-This module contains the smaller dataclasses that represent individual
-fields and components within larger flow structures like nodes and tools.
-"""
-
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
-from typing import Any
-
-from .enums import InstructionType, TransitionConditionType
+from typing import Any, Literal
 
 
 @dataclass
 class Instruction:
-    """Represents an instruction for how a node should behave.
-
-    Attributes:
-        type: The type of instruction (static_text or prompt)
-        text: The actual instruction content
-    """
-
-    type: InstructionType | str
+    type: Literal["static_text", "prompt"]
     text: str
-
-    def __post_init__(self):
-        if isinstance(self.type, str):
-            try:
-                self.type = InstructionType(self.type)
-            except ValueError:
-                # Allow custom instruction types
-                pass
-        # Allow empty text - it might be valid in some cases
 
     @staticmethod
     def from_dict(d: dict[str, Any]) -> Instruction:
-        """Create an Instruction from a dictionary representation."""
         if not isinstance(d, dict):
             raise ValueError("Instruction must be a dictionary")
 
@@ -50,53 +25,62 @@ class Instruction:
 
 
 @dataclass
+class Equation:
+    left_operand: str
+    operator: str
+    right_operand: str
+
+    @staticmethod
+    def from_dict(d: dict[str, Any]) -> Equation:
+        if not isinstance(d, dict):
+            raise ValueError("Equation must be a dictionary")
+
+        return Equation(
+            left_operand=d.get("left_operand", ""),
+            operator=d.get("operator", ""),
+            right_operand=d.get("right_operand", ""),
+        )
+
+
+@dataclass
 class TransitionCondition:
-    """Represents a condition that determines when to transition between nodes.
-
-    Attributes:
-        type: The type of condition evaluation (prompt, regex, exact_match)
-        prompt: The condition prompt or pattern
-    """
-
-    type: TransitionConditionType | str
-    prompt: str
+    type: Literal["prompt", "equation"]
+    prompt: str | None = None
+    equations: list[Equation] | None = None
+    operator: str | None = None
 
     def __post_init__(self):
-        if isinstance(self.type, str):
-            try:
-                self.type = TransitionConditionType(self.type)
-            except ValueError:
-                # Allow custom transition condition types
-                pass
-        if not self.prompt.strip():
+        if self.prompt is None and not self.equations:
+            raise ValueError("Transition condition must have either prompt or equations")
+        if self.prompt is not None and not self.prompt.strip():
             raise ValueError("Transition condition prompt cannot be empty")
 
     @staticmethod
     def from_dict(d: dict[str, Any]) -> TransitionCondition:
-        """Create a TransitionCondition from a dictionary representation."""
         if not isinstance(d, dict):
             raise ValueError("TransitionCondition must be a dictionary")
 
-        condition_type = d.get("type", "prompt")
-        prompt = d.get("prompt", "")
+        condition_type = d.get("type", "")
+        prompt = d.get("prompt", None)  # Use None as default, not empty string
+        equations = d.get("equations", None)
+        operator = d.get("operator", None)
 
-        if not prompt:
-            raise ValueError("Transition condition prompt is required")
+        if not prompt and not equations:
+            raise ValueError("Transition condition prompt or equation is required")
 
-        return TransitionCondition(type=condition_type, prompt=prompt)
+        if equations:
+            equations = [Equation.from_dict(e) for e in equations]
+
+        return TransitionCondition(
+            type=condition_type,
+            prompt=prompt,
+            equations=equations,
+            operator=operator,
+        )
 
 
 @dataclass
 class Edge:
-    """Represents a connection between nodes in the conversation flow.
-
-    Attributes:
-        id: Unique identifier for this edge
-        condition: Human-readable description of the transition condition
-        transition_condition: The actual condition logic
-        destination_node_id: ID of the target node (None for terminal edges)
-    """
-
     id: str
     condition: str
     transition_condition: TransitionCondition
@@ -107,10 +91,11 @@ class Edge:
             raise ValueError("Edge ID cannot be empty")
         if not self.condition.strip():
             raise ValueError("Edge condition cannot be empty")
+        if not self.transition_condition:
+            raise ValueError("Edge transition_condition cannot be empty")
 
     @staticmethod
     def from_dict(d: dict[str, Any]) -> Edge:
-        """Create an Edge from a dictionary representation."""
         if not isinstance(d, dict):
             raise ValueError("Edge must be a dictionary")
 
@@ -122,9 +107,12 @@ class Edge:
         if not condition:
             raise ValueError("Edge condition is required")
 
-        tc_data = d.get("transition_condition", {})
+        tc_data = d.get("transition_condition", None)
         if not tc_data:
             raise ValueError("Edge transition_condition is required")
+
+        if not isinstance(tc_data, dict):
+            raise ValueError("Edge transition_condition must be a dictionary")
 
         return Edge(
             id=edge_id,
@@ -136,12 +124,6 @@ class Edge:
 
 @dataclass
 class GlobalNodeSetting:
-    """Represents a global node setting that can trigger from anywhere in the flow.
-
-    Attributes:
-        condition: The condition that triggers this global transition
-    """
-
     condition: str
 
     def __post_init__(self):
@@ -150,7 +132,6 @@ class GlobalNodeSetting:
 
     @staticmethod
     def from_dict(d: dict[str, Any]) -> GlobalNodeSetting:
-        """Create a GlobalNodeSetting from a dictionary representation."""
         if not isinstance(d, dict):
             raise ValueError("GlobalNodeSetting must be a dictionary")
 
@@ -163,25 +144,46 @@ class GlobalNodeSetting:
 
 @dataclass
 class GatherInputVariable:
-    """Represents a variable to be collected from user input with validation.
-
-    Attributes:
-        name: Variable name for storage and reference
-        type: Data type (string, email, phone, date, number, etc.)
-        description: Human-readable description for the variable
-        required: Whether this variable is required
-        max_attempts: Maximum number of collection attempts before failure
-        regex_pattern: Optional regex pattern for validation
-        regex_error_message: Error message when regex validation fails
-    """
-
     name: str
-    type: str
+    type: Literal[
+        "string",
+        "email",
+        "phone",
+        "number",
+        "integer",
+        "float",
+        "date",
+        "url",
+        "boolean",
+        "custom",
+    ]
     description: str
     required: bool = False
     max_attempts: int = 3
     regex_pattern: str | None = None
     regex_error_message: str | None = None
+
+    _DEFAULT_PATTERNS = {
+        "email": r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$",
+        "phone": r"^(\+?1[-\s]?)?\(?\d{3}\)?[-\s]?\d{3}[-\s]?\d{4}$",
+        "number": r"^-?\d*\.?\d+$",
+        "integer": r"^-?\d+$",
+        "float": r"^-?\d*\.\d+$",
+        "date": r"^\d{1,2}[/-]\d{1,2}[/-]\d{2,4}$|^\d{4}[/-]\d{1,2}[/-]\d{1,2}$",
+        "url": r"^https?://[^\s/$.?#].[^\s]*$",
+        "boolean": r"^(true|false|yes|no|1|0)$",
+    }
+
+    _DEFAULT_ERROR_MESSAGES = {
+        "email": "Please provide a valid email address",
+        "phone": "Please provide a valid phone number",
+        "number": "Please provide a valid number",
+        "integer": "Please provide a valid integer",
+        "float": "Please provide a valid decimal number",
+        "date": "Please provide a valid date (MM/DD/YYYY or YYYY-MM-DD)",
+        "url": "Please provide a valid URL",
+        "boolean": "Please provide yes/no, true/false, or 1/0",
+    }
 
     def __post_init__(self):
         if not self.name.strip():
@@ -191,9 +193,36 @@ class GatherInputVariable:
         if self.max_attempts < 1:
             raise ValueError("Max attempts must be at least 1")
 
+    def get_validation_pattern(self) -> str | None:
+        if self.regex_pattern:
+            return self.regex_pattern
+        return self._DEFAULT_PATTERNS.get(self.type)
+
+    def get_validation_error_message(self) -> str:
+        if self.regex_error_message:
+            return self.regex_error_message
+        return self._DEFAULT_ERROR_MESSAGES.get(self.type, "Invalid input format")
+
+    def validate_value(self, value: Any) -> tuple[bool, str]:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            if self.required:
+                return False, f"{self.name} is required"
+            return True, ""
+
+        str_value = str(value).strip()
+
+        pattern = self.get_validation_pattern()
+        if pattern:
+            try:
+                if not re.match(pattern, str_value, re.IGNORECASE):
+                    return False, self.get_validation_error_message()
+            except re.error as e:
+                return False, f"Invalid regex pattern: {e}"
+
+        return True, ""
+
     @staticmethod
     def from_dict(d: dict[str, Any]) -> GatherInputVariable:
-        """Create a GatherInputVariable from a dictionary representation."""
         if not isinstance(d, dict):
             raise ValueError("GatherInputVariable must be a dictionary")
 
@@ -214,62 +243,36 @@ class GatherInputVariable:
 
 @dataclass
 class TransferDestination:
-    """Represents a call transfer destination.
+    """Transfer destination configuration."""
 
-    Attributes:
-        type: Type of transfer destination
-        number: Phone number or destination identifier
-        sip_uri: SIP URI for SIP-based transfers
-        description: Human-readable description of the destination
-    """
-
-    type: str
-    number: str | None = None
+    number: str
     sip_uri: str | None = None
-    description: str | None = None
 
     @staticmethod
     def from_dict(d: dict[str, Any]) -> TransferDestination:
-        """Create a TransferDestination from a dictionary representation."""
         if not isinstance(d, dict):
             raise ValueError("TransferDestination must be a dictionary")
-        return TransferDestination(
-            type=d.get("type", ""),
-            number=d.get("number"),
-            sip_uri=d.get("sip_uri"),
-            description=d.get("description"),
-        )
+
+        return TransferDestination(number=d.get("number", ""), sip_uri=d.get("sip_uri"))
 
 
 @dataclass
 class TransferOption:
-    """Represents options for call transfer behavior.
+    """Transfer option configuration."""
 
-    Attributes:
-        type: Type of transfer option
-        option: Additional configuration options
-        show_transferee_as_caller: Whether to show the transferee as the caller
-    """
-
-    type: str
-    option: dict[str, Any] | None = None
-    show_transferee_as_caller: bool | None = None
+    timeout: int = 30
 
     @staticmethod
     def from_dict(d: dict[str, Any]) -> TransferOption:
-        """Create a TransferOption from a dictionary representation."""
         if not isinstance(d, dict):
             raise ValueError("TransferOption must be a dictionary")
-        return TransferOption(
-            type=d.get("type", ""),
-            option=d.get("option"),
-            show_transferee_as_caller=d.get("show_transferee_as_caller"),
-        )
+
+        return TransferOption(timeout=d.get("timeout", 30))
 
 
-# Export all field types
 __all__ = [
     "Instruction",
+    "Equation",
     "TransitionCondition",
     "Edge",
     "GlobalNodeSetting",

@@ -1,50 +1,16 @@
-"""
-Input/output utilities for conversation flows.
-
-This module provides functions for loading and saving conversation flows
-from various sources including files, URLs, and in-memory data.
-"""
-
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Union
+from typing import Any
 
 from .flow_spec import FlowSpec
 
 
-def load_flow(source: Union[str, Path, dict[str, Any]]) -> FlowSpec:
-    """Load a conversation flow from various sources.
-
-    Args:
-        source: Can be:
-            - File path (str or Path) to a JSON file
-            - Dictionary containing flow data
-
-    Returns:
-        FlowSpec instance
-
-    Raises:
-        FileNotFoundError: If file path doesn't exist
-        ValueError: If data is invalid
-        json.JSONDecodeError: If JSON is malformed
-
-    Example:
-        ```python
-        # Load from file
-        flow = load_flow("my_flow.json")
-
-        # Load from dictionary
-        flow_data = {"conversation_flow_id": "test", ...}
-        flow = load_flow(flow_data)
-        ```
-    """
+def load_flow(source: str | Path | dict[str, Any]) -> FlowSpec:
     if isinstance(source, dict):
-        # Load from dictionary
         return FlowSpec.from_dict(source)
 
-    # Load from file path
     path = Path(source)
     if not path.exists():
         raise FileNotFoundError(f"Flow file not found: {path}")
@@ -58,25 +24,10 @@ def load_flow(source: Union[str, Path, dict[str, Any]]) -> FlowSpec:
     return FlowSpec.from_dict(data)
 
 
-def save_flow(flow: FlowSpec, target: Union[str, Path]) -> None:
-    """Save a conversation flow to a JSON file.
-
-    Args:
-        flow: FlowSpec instance to save
-        target: File path where to save the flow
-
-    Raises:
-        OSError: If file cannot be written
-
-    Example:
-        ```python
-        save_flow(my_flow, "output/saved_flow.json")
-        ```
-    """
+def save_flow(flow: FlowSpec, target: str | Path) -> None:
     path = Path(target)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Convert FlowSpec to dictionary representation
     data = flow_to_dict(flow)
 
     with open(path, "w", encoding="utf-8") as f:
@@ -84,17 +35,6 @@ def save_flow(flow: FlowSpec, target: Union[str, Path]) -> None:
 
 
 def flow_to_dict(flow: FlowSpec, use_arrays: bool = True) -> dict[str, Any]:
-    """Convert a FlowSpec to its dictionary representation.
-
-    Args:
-        flow: FlowSpec instance to convert
-        use_arrays: If True, nodes and tools are returned as arrays.
-                   If False, they are returned as dictionaries keyed by ID.
-
-    Returns:
-        Dictionary representation suitable for JSON serialization
-    """
-    # Convert nodes dict to list
     nodes_list = []
     for node in flow.nodes.values():
         node_data: dict[str, Any] = {
@@ -124,8 +64,19 @@ def flow_to_dict(flow: FlowSpec, use_arrays: bool = True) -> dict[str, Any]:
                     "id": edge.id,
                     "condition": edge.condition,
                     "transition_condition": {
-                        "type": str(edge.transition_condition.type),
+                        "type": edge.transition_condition.type,
                         "prompt": edge.transition_condition.prompt,
+                        "equations": [
+                            {
+                                "left_operand": eq.left_operand,
+                                "operator": eq.operator,
+                                "right_operand": eq.right_operand,
+                            }
+                            for eq in (edge.transition_condition.equations or [])
+                        ]
+                        if edge.transition_condition.equations
+                        else None,
+                        "operator": edge.transition_condition.operator,
                     },
                     "destination_node_id": edge.destination_node_id,
                 }
@@ -138,8 +89,19 @@ def flow_to_dict(flow: FlowSpec, use_arrays: bool = True) -> dict[str, Any]:
                 "id": edge.id,
                 "condition": edge.condition,
                 "transition_condition": {
-                    "type": str(edge.transition_condition.type),
+                    "type": edge.transition_condition.type,
                     "prompt": edge.transition_condition.prompt,
+                    "equations": [
+                        {
+                            "left_operand": eq.left_operand,
+                            "operator": eq.operator,
+                            "right_operand": eq.right_operand,
+                        }
+                        for eq in (edge.transition_condition.equations or [])
+                    ]
+                    if edge.transition_condition.equations
+                    else None,
+                    "operator": edge.transition_condition.operator,
                 },
                 "destination_node_id": edge.destination_node_id,
             }
@@ -175,7 +137,6 @@ def flow_to_dict(flow: FlowSpec, use_arrays: bool = True) -> dict[str, Any]:
 
         nodes_list.append(node_data)
 
-    # Convert tools dict to list
     tools_list = []
     for tool in flow.tools.values():
         tool_data: dict[str, Any] = {
@@ -205,9 +166,7 @@ def flow_to_dict(flow: FlowSpec, use_arrays: bool = True) -> dict[str, Any]:
 
         tools_list.append(tool_data)
 
-    # Build final dictionary
     if use_arrays:
-        # Use arrays for nodes and tools
         result = {
             "conversation_flow_id": flow.conversation_flow_id,
             "version": flow.version,
@@ -217,7 +176,6 @@ def flow_to_dict(flow: FlowSpec, use_arrays: bool = True) -> dict[str, Any]:
             "tools": tools_list,
         }
     else:
-        # Use dictionaries keyed by ID for nodes and tools
         nodes_dict = {node_data["id"]: node_data for node_data in nodes_list}
         tools_dict = {tool_data["tool_id"]: tool_data for tool_data in tools_list}
 
@@ -242,88 +200,4 @@ def flow_to_dict(flow: FlowSpec, use_arrays: bool = True) -> dict[str, Any]:
     return result
 
 
-# Async versions using aiofiles if available
-try:
-    import aiofiles
-    import aiofiles.os
-
-    _HAS_AIOFILES = True
-except ImportError:
-    _HAS_AIOFILES = False
-
-
-async def load_flow_async(source: Union[str, Path, dict[str, Any]]) -> FlowSpec:
-    """Async version of load_flow.
-
-    Args:
-        source: Can be:
-            - File path (str or Path) to a JSON file
-            - Dictionary containing flow data
-
-    Returns:
-        FlowSpec instance
-
-    Raises:
-        ImportError: If aiofiles is not installed
-        FileNotFoundError: If file path doesn't exist
-        ValueError: If data is invalid
-        json.JSONDecodeError: If JSON is malformed
-
-    Note:
-        Requires aiofiles package for file operations.
-    """
-    if not _HAS_AIOFILES:
-        raise ImportError("aiofiles package required for async flow loading")
-
-    if isinstance(source, dict):
-        # Load from dictionary (no async needed)
-        return FlowSpec.from_dict(source)
-
-    # Load from file path
-    path = Path(source)
-    if not await aiofiles.os.path.exists(path):
-        raise FileNotFoundError(f"Flow file not found: {path}")
-
-    try:
-        async with aiofiles.open(path, encoding="utf-8") as f:
-            content = await f.read()
-            data = json.loads(content)
-    except json.JSONDecodeError as e:
-        raise json.JSONDecodeError(f"Invalid JSON in {path}: {e.msg}", e.doc, e.pos) from e
-
-    return FlowSpec.from_dict(data)
-
-
-async def save_flow_async(flow: FlowSpec, target: Union[str, Path]) -> None:
-    """Async version of save_flow.
-
-    Args:
-        flow: FlowSpec instance to save
-        target: File path where to save the flow
-
-    Raises:
-        ImportError: If aiofiles is not installed
-        OSError: If file cannot be written
-    """
-    if not _HAS_AIOFILES:
-        raise ImportError("aiofiles package required for async flow saving")
-
-    path = Path(target)
-    await aiofiles.os.makedirs(path.parent, exist_ok=True)
-
-    # Convert FlowSpec to dictionary representation
-    data = flow_to_dict(flow)
-    content = json.dumps(data, indent=2, ensure_ascii=False)
-
-    async with aiofiles.open(path, "w", encoding="utf-8") as f:
-        await f.write(content)
-
-
-# Export all functions
-__all__ = [
-    "load_flow",
-    "save_flow",
-    "flow_to_dict",
-    "load_flow_async",
-    "save_flow_async",
-]
+__all__ = ["load_flow", "save_flow", "flow_to_dict"]

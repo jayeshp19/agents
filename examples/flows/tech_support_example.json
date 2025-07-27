@@ -1,0 +1,1235 @@
+{
+    "conversation_flow_id": "tech_support_flow_001",
+    "version": 1,
+    "global_prompt": "## Task Overview ##\n\nYou are a technical support agent for CloudSync Pro, a cloud storage and synchronization software. You help customers troubleshoot issues, check their account status, and create support tickets when needed.\n\n## Response Guidelines ##\n\n1. Be professional, patient, and empathetic\n2. Gather all necessary information before taking action\n3. Explain technical concepts in simple terms\n4. Always verify customer identity before accessing account information\n5. Document all interactions properly",
+    "nodes": [
+        {
+            "id": "start-node-greeting",
+            "name": "Welcome",
+            "type": "conversation",
+            "instruction": {
+                "type": "static_text",
+                "text": "Hello! Thank you for contacting CloudSync Pro technical support. My name is Alex, and I'll be helping you today. To get started, could you please tell me what issue you're experiencing?"
+            },
+            "edges": [
+                {
+                    "id": "edge-to-issue-type",
+                    "condition": "user describes issue",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "user mentions any issue or problem"
+                    },
+                    "destination_node_id": "node-identify-issue"
+                }
+            ],
+            "start_speaker": "agent",
+            "display_position": {
+                "x": 100,
+                "y": 300
+            }
+        },
+        {
+            "id": "node-identify-issue",
+            "name": "Identify Issue Type",
+            "type": "conversation",
+            "instruction": {
+                "type": "prompt",
+                "text": "Listen to the user's issue and categorize it. Common issues include: sync problems, login issues, storage full, performance problems, billing questions. Ask clarifying questions if needed."
+            },
+            "edges": [
+                {
+                    "id": "edge-sync-issue",
+                    "condition": "sync or synchronization issue",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "user mentions sync not working, files not updating, or synchronization problems"
+                    },
+                    "destination_node_id": "node-gather-account-info"
+                },
+                {
+                    "id": "edge-login-issue",
+                    "condition": "login or authentication issue",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "user mentions can't login, password problems, or authentication errors"
+                    },
+                    "destination_node_id": "node-gather-account-info"
+                },
+                {
+                    "id": "edge-billing-issue",
+                    "condition": "billing or payment issue",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "user mentions billing, payment, subscription, or pricing questions"
+                    },
+                    "destination_node_id": "node-gather-account-info"
+                },
+                {
+                    "id": "edge-other-issue",
+                    "condition": "other or unclear issue",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "issue doesn't fit other categories or needs more information"
+                    },
+                    "destination_node_id": "node-gather-detailed-info"
+                }
+            ],
+            "display_position": {
+                "x": 400,
+                "y": 300
+            }
+        },
+        {
+            "id": "node-gather-account-info",
+            "name": "Gather Account Information",
+            "type": "gather_input",
+            "gather_input_instruction": "I'd be happy to help with that. To access your account and investigate the issue, I'll need to verify your identity. Please provide your email address associated with your CloudSync Pro account.",
+            "gather_input_variables": [
+                {
+                    "name": "email",
+                    "type": "string",
+                    "description": "Customer's email address"
+                },
+                {
+                    "name": "account_number",
+                    "type": "string",
+                    "description": "Account number (if customer volunteers it)"
+                }
+            ],
+            "edges": [
+                {
+                    "id": "edge-gather-to-verify",
+                    "condition": "data gathered",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "always true"
+                    },
+                    "destination_node_id": "node-verify-account"
+                }
+            ],
+            "display_position": {
+                "x": 700,
+                "y": 200
+            }
+        },
+        {
+            "id": "node-gather-detailed-info",
+            "name": "Gather Detailed Information",
+            "type": "conversation",
+            "instruction": {
+                "type": "prompt",
+                "text": "I understand you're having an issue. Could you please provide more details about what's happening? For example: When did this start? What error messages are you seeing? What steps have you already tried?"
+            },
+            "edges": [
+                {
+                    "id": "edge-info-gathered",
+                    "condition": "user provides details",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "user provides specific information about their issue"
+                    },
+                    "destination_node_id": "node-gather-account-info"
+                }
+            ],
+            "display_position": {
+                "x": 700,
+                "y": 400
+            }
+        },
+        {
+            "id": "node-verify-account",
+            "name": "Verify Account",
+            "type": "function",
+            "tool_id": "tool-verify-account",
+            "tool_type": "custom",
+            "speak_during_execution": true,
+            "instruction": {
+                "type": "static_text",
+                "text": "Let me verify your account information..."
+            },
+            "edges": [
+                {
+                    "id": "edge-premium-account",
+                    "condition": "premium account found",
+                    "transition_condition": {
+                        "type": "equation",
+                        "equations": [
+                            {
+                                "left_operand": "account_type",
+                                "operator": "==",
+                                "right_operand": "premium"
+                            },
+                            {
+                                "left_operand": "account_status",
+                                "operator": "==",
+                                "right_operand": "active"
+                            }
+                        ],
+                        "operator": "AND"
+                    },
+                    "destination_node_id": "node-premium-support"
+                },
+                {
+                    "id": "edge-account-found",
+                    "condition": "account found and active",
+                    "transition_condition": {
+                        "type": "equation",
+                        "equations": [
+                            {
+                                "left_operand": "account_found",
+                                "operator": "==",
+                                "right_operand": "true"
+                            },
+                            {
+                                "left_operand": "account_status",
+                                "operator": "==",
+                                "right_operand": "active"
+                            }
+                        ],
+                        "operator": "AND"
+                    },
+                    "destination_node_id": "node-gather-verification"
+                },
+                {
+                    "id": "edge-suspended-account",
+                    "condition": "account suspended",
+                    "transition_condition": {
+                        "type": "equation",
+                        "equations": [
+                            {
+                                "left_operand": "account_status",
+                                "operator": "==",
+                                "right_operand": "suspended"
+                            }
+                        ]
+                    },
+                    "destination_node_id": "node-account-suspended"
+                },
+                {
+                    "id": "edge-account-not-found",
+                    "condition": "account not found",
+                    "transition_condition": {
+                        "type": "equation",
+                        "equations": [
+                            {
+                                "left_operand": "account_found",
+                                "operator": "==",
+                                "right_operand": "false"
+                            }
+                        ]
+                    },
+                    "destination_node_id": "node-account-not-found"
+                },
+                {
+                    "id": "edge-verify-error",
+                    "condition": "verification error",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "error or status equals error"
+                    },
+                    "destination_node_id": "node-system-error"
+                }
+            ],
+            "display_position": {
+                "x": 1000,
+                "y": 200
+            }
+        },
+        {
+            "id": "node-gather-verification",
+            "name": "Security Verification",
+            "type": "gather_input",
+            "gather_input_instruction": "Thank you. For security purposes, could you please provide the last 4 digits of the credit card on file, or your account PIN?",
+            "gather_input_variables": [
+                {
+                    "name": "verification_code",
+                    "type": "string",
+                    "description": "Last 4 digits of credit card or account PIN"
+                }
+            ],
+            "edges": [
+                {
+                    "id": "edge-verify-to-check",
+                    "condition": "verification code gathered",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "always true"
+                    },
+                    "destination_node_id": "node-check-verification"
+                }
+            ],
+            "display_position": {
+                "x": 1300,
+                "y": 200
+            }
+        },
+        {
+            "id": "node-check-verification",
+            "name": "Verify Security Code",
+            "type": "function",
+            "tool_id": "tool-check-verification",
+            "tool_type": "custom",
+            "speak_during_execution": false,
+            "edges": [
+                {
+                    "id": "edge-verification-success",
+                    "condition": "verification successful",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "verified is true or status equals verified"
+                    },
+                    "destination_node_id": "node-diagnose-issue"
+                },
+                {
+                    "id": "edge-verification-failed",
+                    "condition": "verification failed",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "verified is false or status equals failed"
+                    },
+                    "destination_node_id": "node-verification-failed"
+                }
+            ],
+            "display_position": {
+                "x": 1600,
+                "y": 200
+            }
+        },
+        {
+            "id": "node-diagnose-issue",
+            "name": "Diagnose Issue",
+            "type": "conversation",
+            "instruction": {
+                "type": "prompt",
+                "text": "Great! I've verified your account. Now let me check your account status and recent activity to better understand the issue. Based on what you've told me, I'll run some diagnostics."
+            },
+            "edges": [
+                {
+                    "id": "edge-run-diagnostics",
+                    "condition": "ready to diagnose",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "always true"
+                    },
+                    "destination_node_id": "node-run-diagnostics"
+                }
+            ],
+            "display_position": {
+                "x": 1900,
+                "y": 200
+            }
+        },
+        {
+            "id": "node-run-diagnostics",
+            "name": "Run Diagnostics",
+            "type": "function",
+            "tool_id": "tool-run-diagnostics",
+            "tool_type": "custom",
+            "speak_during_execution": true,
+            "instruction": {
+                "type": "static_text",
+                "text": "Running diagnostics on your account..."
+            },
+            "wait_for_result": true,
+            "edges": [
+                {
+                    "id": "edge-critical-issue",
+                    "condition": "critical issue found",
+                    "transition_condition": {
+                        "type": "equation",
+                        "equations": [
+                            {
+                                "left_operand": "issue_severity",
+                                "operator": "==",
+                                "right_operand": "critical"
+                            },
+                            {
+                                "left_operand": "issue_count",
+                                "operator": ">",
+                                "right_operand": "3"
+                            }
+                        ],
+                        "operator": "AND"
+                    },
+                    "destination_node_id": "node-create-ticket"
+                },
+                {
+                    "id": "edge-issue-found",
+                    "condition": "issue identified",
+                    "transition_condition": {
+                        "type": "equation",
+                        "equations": [
+                            {
+                                "left_operand": "issue_found",
+                                "operator": "==",
+                                "right_operand": "true"
+                            },
+                            {
+                                "left_operand": "issue_count",
+                                "operator": ">",
+                                "right_operand": "0"
+                            }
+                        ],
+                        "operator": "OR"
+                    },
+                    "destination_node_id": "node-present-solution"
+                },
+                {
+                    "id": "edge-no-issue-found",
+                    "condition": "no issue found",
+                    "transition_condition": {
+                        "type": "equation",
+                        "equations": [
+                            {
+                                "left_operand": "issue_found",
+                                "operator": "==",
+                                "right_operand": "false"
+                            },
+                            {
+                                "left_operand": "issue_count",
+                                "operator": "==",
+                                "right_operand": "0"
+                            }
+                        ],
+                        "operator": "AND"
+                    },
+                    "destination_node_id": "node-gather-more-details"
+                }
+            ],
+            "display_position": {
+                "x": 2200,
+                "y": 200
+            }
+        },
+        {
+            "id": "node-present-solution",
+            "name": "Present Solution",
+            "type": "conversation",
+            "instruction": {
+                "type": "prompt",
+                "text": "Based on the diagnostics, explain what issue was found and present the solution. Be clear about what steps the customer should take."
+            },
+            "edges": [
+                {
+                    "id": "edge-solution-accepted",
+                    "condition": "customer accepts solution",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "customer agrees to try the solution or says okay/yes"
+                    },
+                    "destination_node_id": "node-apply-fix"
+                },
+                {
+                    "id": "edge-needs-escalation",
+                    "condition": "customer wants escalation",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "customer asks for supervisor or wants to escalate"
+                    },
+                    "destination_node_id": "node-create-ticket"
+                }
+            ],
+            "display_position": {
+                "x": 2500,
+                "y": 200
+            }
+        },
+        {
+            "id": "node-apply-fix",
+            "name": "Apply Fix",
+            "type": "function",
+            "tool_id": "tool-apply-fix",
+            "tool_type": "custom",
+            "speak_during_execution": true,
+            "instruction": {
+                "type": "static_text",
+                "text": "I'm applying the fix to your account now. This should just take a moment..."
+            },
+            "edges": [
+                {
+                    "id": "edge-fix-successful",
+                    "condition": "fix applied successfully",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "success is true or status equals fixed"
+                    },
+                    "destination_node_id": "node-confirm-resolution"
+                },
+                {
+                    "id": "edge-fix-failed",
+                    "condition": "fix failed",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "success is false or status equals failed"
+                    },
+                    "destination_node_id": "node-create-ticket"
+                }
+            ],
+            "display_position": {
+                "x": 2800,
+                "y": 200
+            }
+        },
+        {
+            "id": "node-gather-more-details",
+            "name": "Gather Additional Details",
+            "type": "gather_input",
+            "gather_input_instruction": "I couldn't identify the issue from our initial diagnostics. To help me investigate further, could you please provide: 1) The exact error message you're seeing (if any), 2) What you were doing when the problem occurred, 3) Which device and operating system you're using",
+            "gather_input_variables": [
+                {
+                    "name": "error_message",
+                    "type": "string",
+                    "description": "Exact error message"
+                },
+                {
+                    "name": "steps_to_reproduce",
+                    "type": "string",
+                    "description": "What user was doing"
+                },
+                {
+                    "name": "device_info",
+                    "type": "string",
+                    "description": "Device and OS information"
+                }
+            ],
+            "edges": [
+                {
+                    "id": "edge-details-to-ticket",
+                    "condition": "details gathered",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "always true"
+                    },
+                    "destination_node_id": "node-create-ticket"
+                }
+            ],
+            "display_position": {
+                "x": 2500,
+                "y": 400
+            }
+        },
+        {
+            "id": "node-create-ticket",
+            "name": "Create Support Ticket",
+            "type": "function",
+            "tool_id": "tool-create-ticket",
+            "tool_type": "custom",
+            "speak_during_execution": true,
+            "instruction": {
+                "type": "static_text",
+                "text": "I'm creating a support ticket for you with all the information we've gathered..."
+            },
+            "edges": [
+                {
+                    "id": "edge-ticket-created",
+                    "condition": "ticket created successfully",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "ticket_id exists or success is true"
+                    },
+                    "destination_node_id": "node-ticket-created"
+                }
+            ],
+            "display_position": {
+                "x": 3100,
+                "y": 300
+            }
+        },
+        {
+            "id": "node-confirm-resolution",
+            "name": "Confirm Resolution",
+            "type": "conversation",
+            "instruction": {
+                "type": "prompt",
+                "text": "The fix has been applied successfully! Your CloudSync should be working normally now. Can you please try the operation again and let me know if everything is working as expected?"
+            },
+            "edges": [
+                {
+                    "id": "edge-issue-resolved",
+                    "condition": "customer confirms resolution",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "customer confirms it's working or says yes/thanks"
+                    },
+                    "destination_node_id": "node-gather-feedback"
+                },
+                {
+                    "id": "edge-still-not-working",
+                    "condition": "issue persists",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "customer says it's still not working or problem persists"
+                    },
+                    "destination_node_id": "node-create-ticket"
+                }
+            ],
+            "display_position": {
+                "x": 3400,
+                "y": 200
+            }
+        },
+        {
+            "id": "node-gather-feedback",
+            "name": "Gather Feedback",
+            "type": "gather_input",
+            "gather_input_instruction": "I'm glad we could resolve your issue! Before we finish, would you mind rating your support experience today on a scale of 1-5, where 5 is excellent?",
+            "gather_input_variables": [
+                {
+                    "name": "satisfaction_rating",
+                    "type": "number",
+                    "description": "Customer satisfaction rating 1-5"
+                },
+                {
+                    "name": "feedback_comments",
+                    "type": "string",
+                    "description": "Optional feedback comments"
+                }
+            ],
+            "edges": [
+                {
+                    "id": "edge-feedback-to-check",
+                    "condition": "feedback gathered",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "always true"
+                    },
+                    "destination_node_id": "node-check-satisfaction"
+                }
+            ],
+            "display_position": {
+                "x": 3700,
+                "y": 200
+            }
+        },
+        {
+            "id": "node-check-satisfaction",
+            "name": "Check Satisfaction Level",
+            "type": "conversation",
+            "instruction": {
+                "type": "prompt",
+                "text": "Process the satisfaction rating and determine next steps"
+            },
+            "edges": [
+                {
+                    "id": "edge-low-satisfaction",
+                    "condition": "low satisfaction",
+                    "transition_condition": {
+                        "type": "equation",
+                        "equations": [
+                            {
+                                "left_operand": "satisfaction_rating",
+                                "operator": "<=",
+                                "right_operand": "2"
+                            }
+                        ]
+                    },
+                    "destination_node_id": "node-handle-dissatisfaction"
+                },
+                {
+                    "id": "edge-high-satisfaction",
+                    "condition": "high satisfaction",
+                    "transition_condition": {
+                        "type": "equation",
+                        "equations": [
+                            {
+                                "left_operand": "satisfaction_rating",
+                                "operator": ">=",
+                                "right_operand": "4"
+                            }
+                        ]
+                    },
+                    "destination_node_id": "node-save-feedback"
+                },
+                {
+                    "id": "edge-neutral-satisfaction",
+                    "condition": "neutral satisfaction",
+                    "transition_condition": {
+                        "type": "equation",
+                        "equations": [
+                            {
+                                "left_operand": "satisfaction_rating",
+                                "operator": "==",
+                                "right_operand": "3"
+                            }
+                        ]
+                    },
+                    "destination_node_id": "node-save-feedback"
+                }
+            ],
+            "display_position": {
+                "x": 3850,
+                "y": 200
+            }
+        },
+        {
+            "id": "node-handle-dissatisfaction",
+            "name": "Handle Low Satisfaction",
+            "type": "conversation",
+            "instruction": {
+                "type": "prompt",
+                "text": "I'm sorry to hear you didn't have a great experience. Your feedback is important to us. Would you like me to connect you with a supervisor who can address your concerns?"
+            },
+            "edges": [
+                {
+                    "id": "edge-wants-supervisor",
+                    "condition": "wants supervisor",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "customer wants to speak with supervisor"
+                    },
+                    "destination_node_id": "node-create-ticket"
+                },
+                {
+                    "id": "edge-no-supervisor",
+                    "condition": "no supervisor needed",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "customer declines supervisor"
+                    },
+                    "destination_node_id": "node-save-feedback"
+                }
+            ],
+            "display_position": {
+                "x": 3850,
+                "y": 350
+            }
+        },
+        {
+            "id": "node-save-feedback",
+            "name": "Save Feedback",
+            "type": "function",
+            "tool_id": "tool-save-feedback",
+            "tool_type": "custom",
+            "speak_during_execution": false,
+            "edges": [
+                {
+                    "id": "edge-feedback-saved",
+                    "condition": "feedback saved",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "always true"
+                    },
+                    "destination_node_id": "node-end-success"
+                }
+            ],
+            "display_position": {
+                "x": 4000,
+                "y": 200
+            }
+        },
+        {
+            "id": "node-ticket-created",
+            "name": "Ticket Created",
+            "type": "conversation",
+            "instruction": {
+                "type": "prompt",
+                "text": "I've created support ticket #{{ticket_id}} for you. Our senior technical team will review this within 24 hours and contact you at {{email}} with a solution. Is there anything else I can help you with today?"
+            },
+            "edges": [
+                {
+                    "id": "edge-has-more-questions",
+                    "condition": "customer has more questions",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "customer asks another question or mentions another issue"
+                    },
+                    "destination_node_id": "node-identify-issue"
+                },
+                {
+                    "id": "edge-no-more-questions",
+                    "condition": "customer is done",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "customer says no, nothing else, or goodbye"
+                    },
+                    "destination_node_id": "node-end-ticket"
+                }
+            ],
+            "display_position": {
+                "x": 3400,
+                "y": 400
+            }
+        },
+        {
+            "id": "node-premium-support",
+            "name": "Premium Support",
+            "type": "conversation",
+            "instruction": {
+                "type": "static_text",
+                "text": "Welcome back! I see you're a premium member. As a valued premium customer, you have priority support. Let me expedite your issue resolution."
+            },
+            "edges": [
+                {
+                    "id": "edge-continue-premium",
+                    "condition": "continue",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "always true"
+                    },
+                    "destination_node_id": "node-diagnose-issue"
+                }
+            ],
+            "display_position": {
+                "x": 1300,
+                "y": 100
+            }
+        },
+        {
+            "id": "node-account-suspended",
+            "name": "Account Suspended",
+            "type": "conversation",
+            "instruction": {
+                "type": "prompt",
+                "text": "I see your account is currently suspended. This is usually due to a billing issue or terms of service violation. Would you like me to help you understand why your account was suspended and how to reactivate it?"
+            },
+            "edges": [
+                {
+                    "id": "edge-help-reactivate",
+                    "condition": "wants help",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "customer wants help with reactivation"
+                    },
+                    "destination_node_id": "node-create-ticket"
+                },
+                {
+                    "id": "edge-no-help",
+                    "condition": "no help needed",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "customer doesn't want help"
+                    },
+                    "destination_node_id": "node-end-suspended"
+                }
+            ],
+            "display_position": {
+                "x": 1000,
+                "y": 350
+            }
+        },
+        {
+            "id": "node-account-not-found",
+            "name": "Account Not Found",
+            "type": "conversation",
+            "instruction": {
+                "type": "prompt",
+                "text": "I couldn't find an account with that email address. This could mean: 1) You may have used a different email when signing up, 2) There might be a typo in the email address, or 3) You may need to create a new account. Would you like to try a different email address or would you like help creating a new account?"
+            },
+            "edges": [
+                {
+                    "id": "edge-try-different-email",
+                    "condition": "try different email",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "customer wants to try different email"
+                    },
+                    "destination_node_id": "node-gather-account-info"
+                },
+                {
+                    "id": "edge-create-account",
+                    "condition": "create new account",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "customer wants to create new account"
+                    },
+                    "destination_node_id": "node-end-referral"
+                }
+            ],
+            "display_position": {
+                "x": 1000,
+                "y": 500
+            }
+        },
+        {
+            "id": "node-verification-failed",
+            "name": "Verification Failed",
+            "type": "conversation",
+            "instruction": {
+                "type": "prompt",
+                "text": "I'm sorry, but the verification code doesn't match our records. For security reasons, I can only provide limited support without proper verification. You can: 1) Try again with the correct verification code, 2) Reset your account PIN through the website, or 3) Contact our security team for identity verification."
+            },
+            "edges": [
+                {
+                    "id": "edge-retry-verification",
+                    "condition": "retry verification",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "customer wants to try again"
+                    },
+                    "destination_node_id": "node-gather-verification"
+                },
+                {
+                    "id": "edge-give-up",
+                    "condition": "customer gives up",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "customer doesn't want to continue"
+                    },
+                    "destination_node_id": "node-end-security"
+                }
+            ],
+            "display_position": {
+                "x": 1600,
+                "y": 500
+            }
+        },
+        {
+            "id": "node-system-error",
+            "name": "System Error",
+            "type": "conversation",
+            "instruction": {
+                "type": "static_text",
+                "text": "I apologize, but I'm experiencing a technical issue accessing our systems right now. This is temporary, and our team is working on it. Please try again in a few minutes, or I can create a priority support ticket for you to ensure your issue is addressed as soon as our systems are back online."
+            },
+            "edges": [
+                {
+                    "id": "edge-create-priority-ticket",
+                    "condition": "create priority ticket",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "customer agrees to create ticket"
+                    },
+                    "destination_node_id": "node-gather-contact-info"
+                },
+                {
+                    "id": "edge-will-try-later",
+                    "condition": "try later",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "customer will try later"
+                    },
+                    "destination_node_id": "node-end-error"
+                }
+            ],
+            "display_position": {
+                "x": 1000,
+                "y": 600
+            }
+        },
+        {
+            "id": "node-gather-contact-info",
+            "name": "Gather Contact Info",
+            "type": "gather_input",
+            "gather_input_instruction": "I'll create a priority ticket for you. Please provide your email address and phone number so our team can contact you once the system is restored.",
+            "gather_input_variables": [
+                {
+                    "name": "contact_email",
+                    "type": "string",
+                    "description": "Email for contact"
+                },
+                {
+                    "name": "contact_phone",
+                    "type": "string",
+                    "description": "Phone number for contact"
+                }
+            ],
+            "edges": [
+                {
+                    "id": "edge-contact-to-ticket",
+                    "condition": "contact info gathered",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "always true"
+                    },
+                    "destination_node_id": "node-create-ticket"
+                }
+            ],
+            "display_position": {
+                "x": 1300,
+                "y": 600
+            }
+        },
+        {
+            "id": "node-end-success",
+            "name": "Successful Resolution",
+            "type": "end",
+            "instruction": {
+                "type": "static_text",
+                "text": "Thank you for your feedback and for choosing CloudSync Pro! I'm glad we could resolve your issue today. Have a great day!"
+            },
+            "display_position": {
+                "x": 4300,
+                "y": 200
+            }
+        },
+        {
+            "id": "node-end-ticket",
+            "name": "End with Ticket",
+            "type": "end",
+            "instruction": {
+                "type": "static_text",
+                "text": "Thank you for contacting CloudSync Pro support. We'll follow up on ticket #{{ticket_id}} within 24 hours. Have a great day!"
+            },
+            "display_position": {
+                "x": 3700,
+                "y": 500
+            }
+        },
+        {
+            "id": "node-end-referral",
+            "name": "End with Referral",
+            "type": "end",
+            "instruction": {
+                "type": "static_text",
+                "text": "To create a new account, please visit our website at cloudsync.pro/signup. If you need help with the signup process, our sales team is available at sales@cloudsync.pro. Thank you for your interest in CloudSync Pro!"
+            },
+            "display_position": {
+                "x": 1300,
+                "y": 700
+            }
+        },
+        {
+            "id": "node-end-security",
+            "name": "End Security Block",
+            "type": "end",
+            "instruction": {
+                "type": "static_text",
+                "text": "For your account security, I cannot proceed without proper verification. Please visit cloudsync.pro/account-recovery or contact our security team at security@cloudsync.pro for assistance. Thank you for understanding."
+            },
+            "display_position": {
+                "x": 1900,
+                "y": 600
+            }
+        },
+        {
+            "id": "node-end-error",
+            "name": "End System Error",
+            "type": "end",
+            "instruction": {
+                "type": "static_text",
+                "text": "I apologize for the inconvenience. Please try again later or visit status.cloudsync.pro for system updates. Thank you for your patience."
+            },
+            "display_position": {
+                "x": 1300,
+                "y": 800
+            }
+        },
+        {
+            "id": "node-end-suspended",
+            "name": "End Account Suspended",
+            "type": "end",
+            "instruction": {
+                "type": "static_text",
+                "text": "Your account remains suspended. To reactivate it, please visit cloudsync.pro/billing or contact billing@cloudsync.pro. Thank you."
+            },
+            "display_position": {
+                "x": 1000,
+                "y": 450
+            }
+        }
+    ],
+    "start_node_id": "start-node-greeting",
+    "start_speaker": "agent",
+    "tools": [
+        {
+            "tool_id": "tool-verify-account",
+            "name": "verify_account",
+            "type": "custom",
+            "description": "Verify customer account exists and get basic info",
+            "url": "https://httpbin.org/post",
+            "http_method": "POST",
+            "headers": {
+                "Content-Type": "application/json"
+            },
+            "parameter_type": "json",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "email": {
+                        "type": "string",
+                        "description": "Customer email address"
+                    },
+                    "account_number": {
+                        "type": "string",
+                        "description": "Optional account number"
+                    }
+                },
+                "required": ["email"]
+            },
+            "response_variables": {
+                "account_found": "$.json.email",
+                "status": "$.json.email"
+            },
+            "timeout_ms": 5000
+        },
+        {
+            "tool_id": "tool-check-verification",
+            "name": "check_verification_code",
+            "type": "custom",
+            "description": "Verify security code matches account",
+            "url": "https://httpbin.org/post",
+            "http_method": "POST",
+            "headers": {
+                "Content-Type": "application/json"
+            },
+            "parameter_type": "json",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "email": {
+                        "type": "string"
+                    },
+                    "verification_code": {
+                        "type": "string"
+                    }
+                },
+                "required": ["email", "verification_code"]
+            },
+            "response_variables": {
+                "verified": "$.json.verification_code",
+                "status": "$.json.verification_code"
+            },
+            "timeout_ms": 3000
+        },
+        {
+            "tool_id": "tool-run-diagnostics",
+            "name": "run_account_diagnostics",
+            "type": "custom",
+            "description": "Run diagnostics on customer account",
+            "url": "https://httpbin.org/post",
+            "http_method": "POST",
+            "headers": {
+                "Content-Type": "application/json"
+            },
+            "parameter_type": "json",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "email": {
+                        "type": "string"
+                    },
+                    "issue_type": {
+                        "type": "string",
+                        "description": "Type of issue reported"
+                    }
+                },
+                "required": ["email"]
+            },
+            "response_variables": {
+                "issue_found": "$.json.email",
+                "issues": "$.json",
+                "recommended_fix": "$.json.issue_type"
+            },
+            "timeout_ms": 10000
+        },
+        {
+            "tool_id": "tool-apply-fix",
+            "name": "apply_account_fix",
+            "type": "custom",
+            "description": "Apply fix to customer account",
+            "url": "https://httpbin.org/post",
+            "http_method": "POST",
+            "headers": {
+                "Content-Type": "application/json"
+            },
+            "parameter_type": "json",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "email": {
+                        "type": "string"
+                    },
+                    "fix_type": {
+                        "type": "string"
+                    },
+                    "issue_details": {
+                        "type": "object"
+                    }
+                },
+                "required": ["email", "fix_type"]
+            },
+            "response_variables": {
+                "success": "$.json.email",
+                "status": "$.json.fix_type"
+            },
+            "timeout_ms": 15000
+        },
+        {
+            "tool_id": "tool-create-ticket",
+            "name": "create_support_ticket",
+            "type": "custom",
+            "description": "Create support ticket for escalation",
+            "url": "https://httpbin.org/post",
+            "http_method": "POST",
+            "headers": {
+                "Content-Type": "application/json"
+            },
+            "parameter_type": "json",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "email": {
+                        "type": "string",
+                        "description": "Customer email"
+                    },
+                    "issue_description": {
+                        "type": "string",
+                        "description": "Detailed issue description"
+                    },
+                    "priority": {
+                        "type": "string",
+                        "enum": ["low", "medium", "high", "urgent"],
+                        "default": "medium"
+                    },
+                    "error_message": {
+                        "type": "string"
+                    },
+                    "steps_to_reproduce": {
+                        "type": "string"
+                    },
+                    "device_info": {
+                        "type": "string"
+                    }
+                },
+                "required": ["email", "issue_description"]
+            },
+            "response_variables": {
+                "ticket_id": "$.headers.X-Amzn-Trace-Id",
+                "success": "$.json.email"
+            },
+            "timeout_ms": 5000
+        },
+        {
+            "tool_id": "tool-save-feedback",
+            "name": "save_customer_feedback",
+            "type": "custom",
+            "description": "Save customer satisfaction feedback",
+            "url": "https://httpbin.org/post",
+            "http_method": "POST",
+            "headers": {
+                "Content-Type": "application/json"
+            },
+            "parameter_type": "json",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "email": {
+                        "type": "string"
+                    },
+                    "satisfaction_rating": {
+                        "type": "number",
+                        "minimum": 1,
+                        "maximum": 5
+                    },
+                    "feedback_comments": {
+                        "type": "string"
+                    },
+                    "issue_resolved": {
+                        "type": "boolean",
+                        "default": true
+                    }
+                },
+                "required": ["email", "satisfaction_rating"]
+            },
+            "response_variables": {
+                "saved": "$.json.satisfaction_rating"
+            },
+            "timeout_ms": 3000
+        }
+    ],
+    "model_choice": {
+        "type": "primary",
+        "model": "gpt-4"
+    },
+    "is_published": false
+}
