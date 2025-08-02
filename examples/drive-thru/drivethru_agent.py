@@ -1,38 +1,37 @@
-import sys
 import os
+import sys
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from dotenv import load_dotenv
-from livekit.agents import (
-    Agent,
-    function_tool,
-    JobContext,
-    cli,
-    WorkerOptions,
-    AgentSession,
-    RunContext,
-    ToolError,
-    FunctionTool,
-    AudioConfig,
-    BackgroundAudioPlayer,
-)
-
-from typing import Literal, Annotated, Union
 from dataclasses import dataclass
+from typing import Annotated, Literal
+
 from database import (
     COMMON_INSTRUCTIONS,
-    find_items_by_id,
-    menu_instructions,
     FakeDB,
     MenuItem,
+    find_items_by_id,
+    menu_instructions,
 )
-from pydantic import BaseModel, Field
-from order import OrderState, OrderedCombo, OrderedHappy, OrderedRegular
+from dotenv import load_dotenv
+from order import OrderedCombo, OrderedHappy, OrderedRegular, OrderState
+from pydantic import Field
+
+from livekit.agents import (
+    Agent,
+    AgentSession,
+    AudioConfig,
+    BackgroundAudioPlayer,
+    FunctionTool,
+    JobContext,
+    RunContext,
+    ToolError,
+    WorkerOptions,
+    cli,
+    function_tool,
+)
+from livekit.plugins import cartesia, deepgram, openai, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
-
-from livekit.plugins import deepgram, openai, elevenlabs, silero, cartesia
-
 
 load_dotenv()
 
@@ -108,9 +107,10 @@ class DriveThruAgent(Agent):
                 str,
                 Field(
                     description="The ID of the sauce the user requested.",
-                    json_schema_extra={"enum": list(available_sauce_ids)},
+                    json_schema_extra={"enum": [*available_sauce_ids, "null"]},
                 ),
-            ],
+            ]
+            | None,
         ):
             """
             Call this when the user orders a **Combo Meal**, like: “Number 4b with a large Sprite” or “I'll do a medium meal.”
@@ -135,6 +135,9 @@ class DriveThruAgent(Agent):
             if drink_size == "null":
                 drink_size = None
 
+            if sauce_id == "null":
+                sauce_id = None
+
             available_sizes = list({item.size for item in drink_sizes if item.size})
             if drink_size is None and len(available_sizes) > 1:
                 raise ToolError(
@@ -154,7 +157,7 @@ class DriveThruAgent(Agent):
                 #     f"error: unknown size {drink_size} for {drink_id}. Available sizes: {', '.join(available_sizes)}."
                 # )
 
-            if not find_items_by_id(sauce_items, sauce_id):
+            if sauce_id and not find_items_by_id(sauce_items, sauce_id):
                 raise ToolError(f"error: the sauce {sauce_id} was not found")
 
             item = OrderedCombo(
@@ -201,9 +204,10 @@ class DriveThruAgent(Agent):
                 str,
                 Field(
                     description="The ID of the sauce the user requested.",
-                    json_schema_extra={"enum": list(available_sauce_ids)},
+                    json_schema_extra={"enum": [*available_sauce_ids, "null"]},
                 ),
-            ],
+            ]
+            | None,
         ) -> str:
             """
             Call this when the user orders a **Happy Meal**, typically for children. These meals come with a main item, a drink, and a sauce.
@@ -226,6 +230,9 @@ class DriveThruAgent(Agent):
             if drink_size == "null":
                 drink_size = None
 
+            if sauce_id == "null":
+                sauce_id = None
+
             available_sizes = list({item.size for item in drink_sizes if item.size})
             if drink_size is None and len(available_sizes) > 1:
                 raise ToolError(
@@ -236,7 +243,7 @@ class DriveThruAgent(Agent):
             if drink_size is not None and not available_sizes:
                 drink_size = None
 
-            if not find_items_by_id(sauce_items, sauce_id):
+            if sauce_id and not find_items_by_id(sauce_items, sauce_id):
                 raise ToolError(f"error: the sauce {sauce_id} was not found")
 
             item = OrderedHappy(

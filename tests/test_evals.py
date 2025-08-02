@@ -1,8 +1,10 @@
-from dataclasses import dataclass
-from livekit.agents import Agent, AgentSession, function_tool, RunContext, workflows, AgentTask
-from livekit.plugins import openai
 import random
+from dataclasses import dataclass
+
 import pytest
+
+from livekit.agents import Agent, AgentSession, AgentTask, RunContext, function_tool
+from livekit.plugins import openai
 
 
 class KellyAgent(Agent):
@@ -40,15 +42,19 @@ async def test_function_call():
         await sess.start(KellyAgent())
 
         result = await sess.run(user_input="What is the weather in San Francisco?")
-        result.expect.function_call(name="lookup_weather", arguments={"location": "San Francisco"})
-        result.expect.function_call_output(output="sunny with a temperature of 70 degrees.")
-        result.expect.message(role="assistant")
+        result.expect.next_event().is_function_call(
+            name="lookup_weather", arguments={"location": "San Francisco"}
+        )
+        result.expect.next_event().is_function_call_output(
+            output="sunny with a temperature of 70 degrees."
+        )
+        result.expect.next_event().is_message(role="assistant")
         result.expect.no_more_events()
 
         result = await sess.run(user_input="Can I speak to Echo?")
         result.expect.skip_next(2)  # fnc_call & fnc_call_output
-        result.expect.agent_handoff(new_agent_type=EchoAgent)
-        result.expect.message(role="assistant")
+        result.expect.next_event().is_agent_handoff(new_agent_type=EchoAgent)
+        result.expect.next_event().is_message(role="assistant")
         result.expect.no_more_events()
 
 
