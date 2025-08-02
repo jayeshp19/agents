@@ -20,6 +20,10 @@ class ToolExecutor:
     def __init__(self, tool_def: dict[str, Any], http_session: aiohttp.ClientSession):
         self.tool = tool_def
         self.session = http_session
+        logger.info(f"DEBUG ToolExecutor initialized with tool: {tool_def.get('tool_id', 'unknown')}")
+        logger.info(f"DEBUG Tool has response_variables: {'response_variables' in tool_def}")
+        if 'response_variables' in tool_def:
+            logger.info(f"DEBUG Response variables: {tool_def['response_variables']}")
 
     async def __call__(self, args: dict[str, Any]) -> dict[str, Any]:
         # Validate arguments against schema if present
@@ -80,7 +84,10 @@ class ToolExecutor:
 
             # Extract variables using JSONPath if specified
             if "response_variables" in self.tool:
+                logger.info(f"DEBUG Raw HTTP response: {data}")
+                logger.info(f"DEBUG Response variables config: {self.tool['response_variables']}")
                 extracted = self._extract_json_paths(data, self.tool["response_variables"])
+                logger.info(f"DEBUG Extracted variables: {extracted}")
                 return extracted if extracted else data
 
             return data
@@ -310,6 +317,22 @@ class FunctionNodeAgent(BaseFlowAgent):
 
         if isinstance(self._function_result, dict):
             context.update(self._function_result)
+
+        # DEBUG: Log the context and variables available for transition evaluation
+        logger.info(f"DEBUG Function result type: {type(self._function_result)}")
+        logger.info(f"DEBUG Function result: {self._function_result}")
+        logger.info(f"DEBUG Transition context keys: {list(context.keys()) if isinstance(context, dict) else 'not dict'}")
+        logger.info(f"DEBUG Flow context variables: {list(self.flow_context.variables.keys())}")
+        
+        # Also log what variables the edges are looking for
+        for edge in self.node.edges:
+            if hasattr(edge.transition_condition, 'equations') and edge.transition_condition.equations:
+                for eq in edge.transition_condition.equations:
+                    logger.info(f"DEBUG Edge {edge.id} looking for: '{eq.left_operand}' {eq.operator} '{eq.right_operand}'")
+                    # Check if variables exist in context
+                    left_val = context.get(eq.left_operand, "NOT_FOUND")
+                    right_val = self.flow_context.variables.get(eq.right_operand, context.get(eq.right_operand, "NOT_FOUND"))
+                    logger.info(f"DEBUG Variable values: {eq.left_operand}='{left_val}', {eq.right_operand}='{right_val}'")
 
         transition = await self._transition_evaluator.evaluate_transitions(
             edges=self.node.edges,

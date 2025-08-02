@@ -280,6 +280,7 @@ class ToolSpec:
     headers: dict[str, str] = field(default_factory=dict)
     query_parameters: dict[str, str] = field(default_factory=dict)
     timeout_ms: int = 120000  # 120 seconds default
+    response_variables: dict[str, str] = field(default_factory=dict)
     # Calendar-specific fields
     event_type_id: int | None = None
     cal_api_key: str | None = None
@@ -352,6 +353,7 @@ class ToolSpec:
             headers=d.get("headers", {}),
             query_parameters=d.get("query_parameters", {}),
             timeout_ms=d.get("timeout_ms", 120000),
+            response_variables=d.get("response_variables", {}),
             event_type_id=d.get("event_type_id"),
             cal_api_key=d.get("cal_api_key"),
             timezone=d.get("timezone"),

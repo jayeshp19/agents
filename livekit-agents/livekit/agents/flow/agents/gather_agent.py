@@ -110,6 +110,11 @@ class GatherInputNode(BaseFlowAgent):
     async def on_user_turn_completed(
         self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage
     ) -> None:
+        # If we're completing, don't process more input
+        if hasattr(self, "_completing") and self._completing:
+            raise StopResponse()
+
+        # If transition is pending, don't process more input
         if self._transition_pending:
             raise StopResponse()
 
@@ -159,8 +164,13 @@ class GatherInputNode(BaseFlowAgent):
             logger.debug(f"Newly flagged fields: {newly_flagged}")
 
             if newly_flagged and self._all_required_data_collected():
-                asyncio.create_task(self._schedule_completion())
-                logger.info(f"All required fields collected: {list(self.flagged_fields)}")
+                # Only schedule completion if not already completing or transition pending
+                if (
+                    not (hasattr(self, "_completing") and self._completing)
+                    and not self._transition_pending
+                ):
+                    asyncio.create_task(self._schedule_completion())
+                    logger.info(f"All required fields collected: {list(self.flagged_fields)}")
 
         except Exception as e:
             logger.error(f"Error in parallel data extraction: {e}")
@@ -261,10 +271,7 @@ RESPONSE FORMAT:
         return required_fields.issubset(self.flagged_fields)
 
     async def _schedule_completion(self) -> None:
-        self._transition_pending = True
-
         self.session.interrupt()
-
         await asyncio.sleep(0.1)
 
         await self._complete_gathering()

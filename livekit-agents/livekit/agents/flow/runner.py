@@ -147,6 +147,7 @@ class FlowRunner:
                 "http_method": tool.http_method,
                 "headers": tool.headers,
                 "timeout_ms": tool.timeout_ms,
+                "response_variables": tool.response_variables,
             }
 
         return None

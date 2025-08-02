@@ -34,12 +34,15 @@ class ConversationNodeAgent(BaseFlowAgent):
 
         if self.node.instruction and self.node.instruction.type == "prompt":
             logger.debug(f"READY: {self.node.name}")
+            self.session.generate_reply(instructions=self.node.instruction.text)
 
     async def on_user_turn_completed(
         self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage
     ) -> None:
         if self._transition_pending:
-            logger.debug(f"Transition already pending for node {self.node.id} ({self.node.name}), ignoring turn")
+            logger.debug(
+                f"Transition already pending for node {self.node.id} ({self.node.name}), ignoring turn"
+            )
             return
 
         try:
@@ -70,7 +73,7 @@ class ConversationNodeAgent(BaseFlowAgent):
                 )
 
                 await self._transition_to_node(transition.destination_node_id)
-                
+
                 # Raise StopResponse to prevent LLM from generating a response
                 raise StopResponse()
             else:
@@ -80,7 +83,9 @@ class ConversationNodeAgent(BaseFlowAgent):
             # Re-raise StopResponse to prevent agent from generating a response
             raise
         except Exception as e:
-            logger.error(f"Error handling user turn in conversation node {self.node.id} ({self.node.name}): {e}")
+            logger.error(
+                f"Error handling user turn in conversation node {self.node.id} ({self.node.name}): {e}"
+            )
             await self.session.say("error occurred while handling user turn")
 
     async def _on_exit_node(self) -> None:

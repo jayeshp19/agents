@@ -152,7 +152,8 @@ Respond with JSON only:
         try:
             # Get the left operand value
             left_value = self._resolve_value(equation.left_operand, context)
-            right_value = equation.right_operand
+            # Also resolve the right operand value
+            right_value = self._resolve_value(equation.right_operand, context)
             operator = equation.operator
 
             # Handle None values

@@ -108,6 +108,7 @@ class BaseFlowAgent(Agent, ABC):
                 # Update the agent
                 self.session.update_agent(next_agent)
                 logger.info(f"Updated agent to {next_agent.__class__.__name__} for node {node_id}")
+                self._transition_pending = False
 
                 # The new agent's on_enter will be called by the session's activity management
                 # We don't need to wait here as the session handles the lifecycle
