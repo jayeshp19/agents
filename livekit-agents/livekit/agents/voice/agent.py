@@ -726,13 +726,16 @@ class AgentTask(Agent, Generic[TaskResult_T]):
                 logger.info(
                     f"AgentTask {self.__class__.__name__} updating chat context for {old_agent.__class__.__name__}"
                 )
-                await old_agent.update_chat_ctx(
-                    old_agent.chat_ctx.merge(
-                        self.chat_ctx, exclude_function_call=True, exclude_instructions=True
-                    )
+                merged_chat_ctx = old_agent.chat_ctx.merge(
+                    self.chat_ctx, exclude_function_call=True, exclude_instructions=True
                 )
+                # set the chat_ctx directly, `session._update_activity` will sync it to the rt_session if needed
+                old_agent._chat_ctx.items[:] = merged_chat_ctx.items
+                # await old_agent.update_chat_ctx(merged_chat_ctx)
 
-                await session._update_activity(old_agent, new_activity="resume")
+                await session._update_activity(
+                    old_agent, new_activity="resume", wait_on_enter=False
+                )
                 logger.info(
                     f"AgentTask {self.__class__.__name__} successfully switched back to {old_agent.__class__.__name__}"
                 )
