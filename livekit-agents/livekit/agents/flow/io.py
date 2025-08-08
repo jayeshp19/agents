@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .fields import Edge
 from .flow_spec import FlowSpec
 
 
@@ -34,6 +35,29 @@ def save_flow(flow: FlowSpec, target: str | Path) -> None:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
+def _edge_to_dict(edge: Edge) -> dict[str, Any]:
+    return {
+        "id": edge.id,
+        "condition": edge.condition,
+        "transition_condition": {
+            "type": edge.transition_condition.type,
+            "prompt": edge.transition_condition.prompt,
+            "equations": [
+                {
+                    "left_operand": eq.left_operand,
+                    "operator": eq.operator,
+                    "right_operand": eq.right_operand,
+                }
+                for eq in (edge.transition_condition.equations or [])
+            ]
+            if edge.transition_condition.equations
+            else None,
+            "operator": edge.transition_condition.operator,
+        },
+        "destination_node_id": edge.destination_node_id,
+    }
+
+
 def flow_to_dict(flow: FlowSpec, use_arrays: bool = True) -> dict[str, Any]:
     nodes_list = []
     for node in flow.nodes.values():
@@ -59,52 +83,10 @@ def flow_to_dict(flow: FlowSpec, use_arrays: bool = True) -> dict[str, Any]:
             node_data["wait_for_result"] = node.wait_for_result
 
         if node.edges:
-            node_data["edges"] = [
-                {
-                    "id": edge.id,
-                    "condition": edge.condition,
-                    "transition_condition": {
-                        "type": edge.transition_condition.type,
-                        "prompt": edge.transition_condition.prompt,
-                        "equations": [
-                            {
-                                "left_operand": eq.left_operand,
-                                "operator": eq.operator,
-                                "right_operand": eq.right_operand,
-                            }
-                            for eq in (edge.transition_condition.equations or [])
-                        ]
-                        if edge.transition_condition.equations
-                        else None,
-                        "operator": edge.transition_condition.operator,
-                    },
-                    "destination_node_id": edge.destination_node_id,
-                }
-                for edge in node.edges
-            ]
+            node_data["edges"] = [_edge_to_dict(edge) for edge in node.edges]
 
         if node.skip_response_edge:
-            edge = node.skip_response_edge
-            node_data["skip_response_edge"] = {
-                "id": edge.id,
-                "condition": edge.condition,
-                "transition_condition": {
-                    "type": edge.transition_condition.type,
-                    "prompt": edge.transition_condition.prompt,
-                    "equations": [
-                        {
-                            "left_operand": eq.left_operand,
-                            "operator": eq.operator,
-                            "right_operand": eq.right_operand,
-                        }
-                        for eq in (edge.transition_condition.equations or [])
-                    ]
-                    if edge.transition_condition.equations
-                    else None,
-                    "operator": edge.transition_condition.operator,
-                },
-                "destination_node_id": edge.destination_node_id,
-            }
+            node_data["skip_response_edge"] = _edge_to_dict(node.skip_response_edge)
 
         if node.global_node_setting:
             node_data["global_node_setting"] = {"condition": node.global_node_setting.condition}

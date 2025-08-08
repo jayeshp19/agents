@@ -1,0 +1,148 @@
+{
+    "conversation_flow_id": "minimal_test_flow",
+    "version": 1,
+    "global_prompt": "You are Alex, a technical support agent for CloudSync Pro. Always maintain context about the customer's sync issue throughout the conversation. Be professional and helpful.",
+    "nodes": [
+        {
+            "id": "start-conversation",
+            "name": "Initial Support",
+            "type": "conversation",
+            "instruction": {
+                "type": "static_text",
+                "text": "Hello! I'm Alex from CloudSync Pro support. I'll help you resolve your sync issue today. Can you describe what's happening?"
+            },
+            "edges": [
+                {
+                    "id": "edge-to-gather",
+                    "condition": "user describes issue",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "user mentions a sync problem, error, or issue with CloudSync"
+                    },
+                    "destination_node_id": "gather-details"
+                }
+            ]
+        },
+        {
+            "id": "gather-details",
+            "name": "Gather Customer Details",
+            "type": "gather_input",
+            "gather_input_instruction": "To help resolve your sync issue, I need to collect some information about your account and the problem.",
+            "gather_input_variables": [
+                {
+                    "name": "customer_email",
+                    "type": "email",
+                    "description": "Customer's email address",
+                    "required": true
+                },
+                {
+                    "name": "issue_description",
+                    "type": "string", 
+                    "description": "Detailed description of the sync issue",
+                    "required": true
+                },
+                {
+                    "name": "error_message",
+                    "type": "string",
+                    "description": "Any error messages they're seeing",
+                    "required": false
+                }
+            ],
+            "edges": [
+                {
+                    "id": "edge-to-function",
+                    "condition": "data collected",
+                    "transition_condition": {
+                        "type": "prompt",
+                        "prompt": "always true"
+                    },
+                    "destination_node_id": "verify-account"
+                }
+            ]
+        },
+        {
+            "id": "verify-account",
+            "name": "Verify Customer Account",
+            "type": "function",
+            "tool_id": "verify-customer-tool",
+            "speak_during_execution": true,
+            "wait_for_result": true,
+            "instruction": {
+                "type": "static_text",
+                "text": "Let me verify your account and check for any known issues..."
+            },
+            "edges": [
+                {
+                    "id": "edge-email-matches",
+                    "condition": "email verification successful",
+                    "transition_condition": {
+                        "type": "equation",
+                        "equations": [
+                            {
+                                "left_operand": "customer_email_returned",
+                                "operator": "==",
+                                "right_operand": "customer_email"
+                            }
+                        ]
+                    },
+                    "destination_node_id": "provide-solution"
+                }
+            ]
+        },
+        {
+            "id": "provide-solution",
+            "name": "Provide Solution",
+            "type": "conversation",
+            "instruction": {
+                "type": "prompt",
+                "text": "Based on the account verification results and the sync issue described, provide a helpful solution or next steps for the customer."
+            },
+            "edges": []
+        }
+    ],
+    "start_node_id": "start-conversation",
+    "start_speaker": "agent",
+    "tools": [
+        {
+            "tool_id": "verify-customer-tool",
+            "name": "verify_customer_account",
+            "type": "custom",
+            "description": "Verify customer account status and sync settings",
+            "url": "https://httpbin.org/post",
+            "http_method": "POST",
+            "headers": {
+                "Content-Type": "application/json"
+            },
+            "parameter_type": "json",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "customer_email": {
+                        "type": "string",
+                        "description": "Customer's email address"
+                    },
+                    "issue_description": {
+                        "type": "string",
+                        "description": "Description of the sync issue"
+                    },
+                    "error_message": {
+                        "type": "string",
+                        "description": "Any error messages"
+                    }
+                },
+                "required": ["customer_email", "issue_description"]
+            },
+            "response_variables": {
+                "customer_email_returned": "$.json.customer_email",
+                "issue_returned": "$.json.issue_description",
+                "response_url": "$.url"
+            },
+            "timeout_ms": 10000
+        }
+    ],
+    "model_choice": {
+        "type": "primary",
+        "model": "gpt-4o"
+    },
+    "is_published": false
+}

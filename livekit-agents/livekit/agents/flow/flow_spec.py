@@ -1,9 +1,3 @@
-"""
-Main dataclass definitions for conversation flow specification.
-
-This module contains the core flow structure classes including nodes,
-tools, and the complete flow specification.
-"""
 
 from __future__ import annotations
 
@@ -26,33 +20,6 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Node:
-    """Represents a single node in the conversation flow.
-
-    A node is a discrete step in the conversation that can perform
-    various actions like responding to users, calling functions,
-    gathering input, or transferring calls.
-
-    Attributes:
-        id: Unique identifier for this node
-        name: Human-readable name for this node
-        type: The type of node (conversation, function, end, etc.)
-        instruction: Instructions for how the node should behave
-        tool_id: ID of the tool to execute (for function nodes)
-        tool_type: Type of tool execution
-        speak_during_execution: Whether to speak while executing functions
-        wait_for_result: Whether to wait for function completion
-        edges: List of possible transitions from this node
-        skip_response_edge: Edge for skipping user response
-        global_node_setting: Global trigger condition for this node
-        transfer_destination: Call transfer destination
-        transfer_option: Call transfer options
-        edge: Single edge for transfer failures
-        gather_input_variables: Variables to collect from user input
-        gather_input_instruction: Instructions for input gathering
-        display_position: UI display position coordinates
-        finetune_conversation_examples: Training examples for fine-tuning
-        start_speaker: Who speaks first in this node (agent or user)
-    """
 
     id: str
     name: str
@@ -77,7 +44,7 @@ class Node:
     finetune_conversation_examples: list[Any] = field(default_factory=list)
     start_speaker: SpeakerType | str | None = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if not self.id.strip():
             raise ValueError("Node ID cannot be empty")
 
@@ -89,6 +56,12 @@ class Node:
                     f"Function node '{self.id}' must have at least one edge to handle results. "
                     "Consider adding edges for success/failure conditions."
                 )
+            # Validate that all edges have destination nodes
+            for edge in self.edges:
+                if not edge.destination_node_id:
+                    raise ValueError(
+                        f"Function node '{self.id}' has edge '{edge.id}' without destination_node_id"
+                    )
 
         elif self.type == "gather_input":
             # Gather nodes MUST have exactly one edge (automatic transition)
@@ -102,10 +75,18 @@ class Node:
                     f"Gather input node '{self.id}' has {len(self.edges)} edges. "
                     "Only the first edge will be used for automatic transition."
                 )
+            # Validate destination exists
+            if not self.edges[0].destination_node_id:
+                raise ValueError(f"Gather input node '{self.id}' edge has no destination_node_id")
 
         elif self.type == "conversation":
             # Conversation nodes can have 0 edges (rely on global transitions)
-            pass
+            # But if they have edges, validate destinations
+            for edge in self.edges:
+                if not edge.destination_node_id:
+                    raise ValueError(
+                        f"Conversation node '{self.id}' has edge '{edge.id}' without destination_node_id"
+                    )
 
         elif self.type == "end":
             # End nodes should not have edges
@@ -248,26 +229,6 @@ class Node:
 
 @dataclass
 class ToolSpec:
-    """Specification for a tool that can be called by function nodes.
-
-    Tools represent external functions or APIs that can be invoked
-    during conversation flow execution.
-
-    Attributes:
-        name: Human-readable tool name
-        description: Description of what the tool does
-        tool_id: Unique identifier for this tool
-        type: Type of tool (custom, local, built-in, etc.)
-        parameters: JSON schema defining tool parameters
-        url: API endpoint URL (for custom HTTP tools)
-        http_method: HTTP method for API calls
-        headers: HTTP headers to include in requests
-        query_parameters: URL query parameters
-        timeout_ms: Request timeout in milliseconds
-        event_type_id: Calendar event type ID (for calendar tools)
-        cal_api_key: Calendar API key
-        timezone: Timezone for calendar operations
-    """
 
     name: str
     description: str
@@ -286,7 +247,7 @@ class ToolSpec:
     cal_api_key: str | None = None
     timezone: str | None = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if not self.name.strip():
             raise ValueError("Tool name cannot be empty")
         if not self.tool_id.strip():
@@ -294,25 +255,21 @@ class ToolSpec:
         if not self.description.strip():
             raise ValueError("Tool description cannot be empty")
 
-        # Convert string types to enums if possible
         if isinstance(self.type, str):
             try:
                 self.type = ToolType(self.type)
             except ValueError:
-                # Allow custom tool types
                 pass
 
         if self.timeout_ms <= 0:
             raise ValueError("Timeout must be positive")
 
-        # Set default http_method for custom tools if not specified
         if self.type == ToolType.CUSTOM:
             if not self.url:
                 raise ValueError("Custom tools must have a URL")
             if self.http_method is None:
                 self.http_method = "POST"
 
-        # Validate HTTP method if specified
         if self.http_method is not None:
             valid_methods = ["GET", "POST", "PUT", "DELETE", "PATCH"]
             if self.http_method not in valid_methods:
@@ -362,23 +319,6 @@ class ToolSpec:
 
 @dataclass
 class FlowSpec:
-    """Complete specification for a conversation flow.
-
-    This is the top-level container that defines an entire conversation
-    flow including all nodes, tools, and configuration.
-
-    Attributes:
-        conversation_flow_id: Unique identifier for this flow
-        version: Version number of the flow
-        global_prompt: Global instructions that apply to all nodes
-        nodes: Dictionary of all nodes in the flow (keyed by node ID)
-        start_node_id: ID of the starting node
-        start_speaker: Who speaks first (agent or user)
-        tools: Dictionary of all tools available to the flow
-        model_choice: LLM model configuration
-        begin_tag_display_position: UI positioning for flow start
-        is_published: Whether this flow is published/active
-    """
 
     conversation_flow_id: str
     version: int
@@ -391,7 +331,7 @@ class FlowSpec:
     begin_tag_display_position: dict[str, Any] | None = None
     is_published: bool | None = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if not self.conversation_flow_id.strip():
             raise ValueError("Flow ID cannot be empty")
         if not self.global_prompt.strip():
@@ -457,7 +397,7 @@ class FlowSpec:
             errors.extend(node_errors)
 
         # Check for unreachable nodes, including nodes accessible via global settings
-        reachable_nodes = set()
+        reachable_nodes: set[str] = set()
         self._find_reachable_nodes(self.start_node_id, reachable_nodes)
 
         # Also include nodes that can be reached via global node settings
@@ -480,7 +420,7 @@ class FlowSpec:
 
         return errors
 
-    def _find_reachable_nodes(self, node_id: str, visited: set[str]):
+    def _find_reachable_nodes(self, node_id: str, visited: set[str]) -> None:
         """Recursively find all reachable nodes from a starting point.
 
         Args:

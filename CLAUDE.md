@@ -225,3 +225,6 @@ return new_agent, "Transferring to specialist..."
 - Monitor resource usage, especially with ML models
 - Test with various audio quality conditions
 - Consider latency impact of component choices
+
+
+# docs: https://docs.livekit.io/llms.txt

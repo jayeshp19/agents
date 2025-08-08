@@ -1,12 +1,13 @@
 import asyncio
 import inspect
 import logging
-from typing import Any, Optional
+import random
+from typing import Any, Optional, cast
 from urllib.parse import parse_qsl, urlencode, urlparse
 
 import aiohttp
-import jsonschema  # type: ignore[import-untyped]
-from jsonpath_ng import parse as jsonpath_parse  # type: ignore[import-untyped]
+import jsonschema
+from jsonpath_ng import parse as jsonpath_parse
 
 from ..base import BaseFlowAgent
 from ..transition_evaluator import FlowContextVariableProvider, TransitionEvaluator
@@ -14,29 +15,67 @@ from ..transition_evaluator import FlowContextVariableProvider, TransitionEvalua
 logger = logging.getLogger(__name__)
 
 
+class _ToolConcurrency:
+    _locks: dict[str, asyncio.Semaphore] = {}
+
+    @classmethod
+    def get(cls, tool_id: str, max_concurrency: int) -> asyncio.Semaphore:
+        if not tool_id:
+            # anonymous limiter key
+            tool_id = "__anon__"
+        lock = cls._locks.get(tool_id)
+        if lock is None:
+            lock = asyncio.Semaphore(max_concurrency)
+            cls._locks[tool_id] = lock
+        return lock
+
+
 class ToolExecutor:
     """Handles HTTP and local execution for function tools."""
 
-    def __init__(self, tool_def: dict[str, Any], http_session: aiohttp.ClientSession):
+    def __init__(self, tool_def: dict[str, Any], http_session: aiohttp.ClientSession | None):
         self.tool = tool_def
         self.session = http_session
-        logger.info(f"DEBUG ToolExecutor initialized with tool: {tool_def.get('tool_id', 'unknown')}")
-        logger.info(f"DEBUG Tool has response_variables: {'response_variables' in tool_def}")
-        if 'response_variables' in tool_def:
-            logger.info(f"DEBUG Response variables: {tool_def['response_variables']}")
+        self._max_retries: int = int(tool_def.get("max_retries", 1))
+        self._retry_backoff_ms: int = int(tool_def.get("retry_backoff_ms", 250))
+        self._compiled_jsonpaths: dict[str, Any] = {}
+        try:
+            rv = self.tool.get("response_variables")
+            if isinstance(rv, dict):
+                for var_name, path in rv.items():
+                    try:
+                        self._compiled_jsonpaths[var_name] = jsonpath_parse(path)
+                    except Exception as e:
+                        logger.error(f"Invalid JSONPath for '{var_name}': '{path}' - {e}")
+        except Exception:
+            # Don't fail tool init on compilation issues; they will be logged during extraction
+            pass
 
-    async def __call__(self, args: dict[str, Any]) -> dict[str, Any]:
+        self._semaphore = None
+        try:
+            max_conc = int(self.tool.get("max_concurrency", 0))
+            if max_conc > 0:
+                self._semaphore = _ToolConcurrency.get(self.tool.get("tool_id", ""), max_conc)
+        except Exception:
+            pass
+
+    async def __call__(self, args: dict[str, Any]) -> Any:
         # Validate arguments against schema if present
         if "parameters" in self.tool:
             self._validate_args(self.tool["parameters"], args)
 
-        if self.tool.get("type") == "custom" and "url" in self.tool:
-            return await self._execute_http(args)
-        return await self._execute_local(args)
+        async def _run() -> Any:
+            if self.tool.get("type") == "custom" and "url" in self.tool:
+                return await self._execute_http(args)
+            return await self._execute_local(args)
+
+        if self._semaphore is None:
+            return await _run()
+        async with self._semaphore:
+            return await _run()
 
     def _validate_args(self, schema: dict[str, Any], args: dict[str, Any]) -> None:
-        """Validate arguments against JSON Schema."""
-        if schema:  # empty dict means no constraints
+        if schema:
             try:
                 jsonschema.validate(instance=args, schema=schema)
             except jsonschema.ValidationError as e:
@@ -44,21 +83,33 @@ class ToolExecutor:
                 raise ValueError(f"Invalid arguments: {e.message}") from e
 
     async def _execute_http(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Execute HTTP function call with flexible parameter handling."""
+        if self.session is None:
+            raise RuntimeError("HTTP session not initialized for ToolExecutor")
         url = self.tool["url"]
         method = self.tool.get("http_method", "POST").upper()
         headers = self.tool.get("headers", {})
         timeout_ms = self.tool.get("timeout_ms", 30000)
         parameter_type = self.tool.get("parameter_type", "json")
+        cb_max_failures = int(self.tool.get("cb_max_failures", 0))
+        cb_reset_ms = int(self.tool.get("cb_reset_ms", 30000))
+        if cb_max_failures > 0:
+            now = asyncio.get_event_loop().time()
+            last_reset = float(self.tool.get("_cb_last_reset", 0.0))
+            recent_failures = int(self.tool.get("_cb_recent_failures", 0))
+            if now - last_reset > (cb_reset_ms / 1000.0):
+                self.tool["_cb_recent_failures"] = 0
+                self.tool["_cb_last_reset"] = now
+                recent_failures = 0
+            if recent_failures >= cb_max_failures:
+                raise RuntimeError("circuit_open: too many recent failures")
 
-        # Merge query params if specified
-        if "query_params" in self.tool:
-            url = self._merge_query(url, self.tool["query_params"])
+        qp = self.tool.get("query_parameters") or self.tool.get("query_params")
+        if qp:
+            url = self._merge_query(url, qp)
 
         timeout = aiohttp.ClientTimeout(total=timeout_ms / 1000)
         req_kwargs: dict[str, Any] = {"headers": headers, "timeout": timeout}
 
-        # Handle different parameter types
         if method == "GET":
             req_kwargs["params"] = args
         else:
@@ -75,44 +126,65 @@ class ToolExecutor:
                 case _:
                     raise ValueError(f"Unsupported parameter_type '{parameter_type}'")
 
-        try:
-            logger.debug(f"Making {method} request to {url} with {parameter_type} params")
+        attempt = 0
+        while True:
+            try:
+                logger.debug(
+                    f"Making {method} request to {url} with {parameter_type} params (attempt {attempt + 1})"
+                )
 
-            async with self.session.request(method, url, **req_kwargs) as response:
-                response.raise_for_status()
-                data = await response.json()
+                async with self.session.request(method, url, **req_kwargs) as response:
+                    if response.status >= 500 or response.status == 429:
+                        text = await response.text()
+                        raise aiohttp.ClientResponseError(
+                            request_info=response.request_info,
+                            history=response.history,
+                            status=response.status,
+                            message=f"Retryable HTTP {response.status}: {text[:200]}",
+                            headers=response.headers,
+                        )
 
-            # Extract variables using JSONPath if specified
-            if "response_variables" in self.tool:
-                logger.info(f"DEBUG Raw HTTP response: {data}")
-                logger.info(f"DEBUG Response variables config: {self.tool['response_variables']}")
-                extracted = self._extract_json_paths(data, self.tool["response_variables"])
-                logger.info(f"DEBUG Extracted variables: {extracted}")
-                return extracted if extracted else data
+                    response.raise_for_status()
+                    data: Any = await response.json()
 
-            return data
+                if "response_variables" in self.tool:
+                    extracted = self._extract_json_paths(data, self.tool["response_variables"])
+                    return extracted if extracted else cast(dict[str, Any], data)
 
-        except aiohttp.ClientError as e:
-            logger.error(f"HTTP error calling {url}: {e}")
-            raise
-        except Exception as e:
-            logger.error(f"Unexpected error calling {url}: {e}")
-            raise
+                return cast(dict[str, Any], data)
+
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                attempt += 1
+                if cb_max_failures > 0:
+                    self.tool["_cb_recent_failures"] = (
+                        int(self.tool.get("_cb_recent_failures", 0)) + 1
+                    )
+                    self.tool["_cb_last_reset"] = asyncio.get_event_loop().time()
+                if attempt > self._max_retries:
+                    logger.error(f"HTTP error calling {url}, no retries left: {e}")
+                    raise
+                base = (self._retry_backoff_ms * (2 ** (attempt - 1))) / 1000.0
+                jitter = random.uniform(0.5, 1.5)
+                backoff = base * jitter
+                logger.warning(
+                    f"HTTP error calling {url}: {e} — retrying in {backoff:.2f}s ({attempt}/{self._max_retries})"
+                )
+                await asyncio.sleep(backoff)
+            except Exception as e:
+                logger.error(f"Unexpected error calling {url}: {e}")
+                raise
 
     async def _execute_local(self, args: dict[str, Any]) -> Any:
-        """Execute local function handler."""
         handler = self.tool.get("handler")
 
         if not handler or not callable(handler):
             raise ValueError(f"No valid handler for function {self.tool.get('tool_id', 'unknown')}")
 
-        # Support both sync and async handlers
         if inspect.iscoroutinefunction(handler):
             return await handler(args)
         return handler(args)
 
     def _merge_query(self, url: str, extra: dict[str, str]) -> str:
-        """Merge extra query parameters into URL."""
         if not extra:
             return url
         parsed = urlparse(url)
@@ -122,40 +194,46 @@ class ToolExecutor:
         return parsed._replace(query=query).geturl()
 
     def _extract_json_paths(self, data: Any, mapping: dict[str, str]) -> dict[str, Any]:
-        """Extract values from response using JSONPath expressions."""
         result: dict[str, Any] = {}
         for var_name, path in mapping.items():
             try:
-                matches = jsonpath_parse(path).find(data)
+                parsed = self._compiled_jsonpaths.get(var_name)
+                if parsed is None:
+                    parsed = jsonpath_parse(path)
+                    self._compiled_jsonpaths[var_name] = parsed
+                matches = parsed.find(data)
                 result[var_name] = matches[0].value if matches else None
+                logger.debug(f"JSONPath extraction succeeded for {var_name}: {result[var_name]}")
             except Exception as e:
-                logger.warning(f"JSONPath extraction failed for {var_name} with path {path}: {e}")
-                result[var_name] = None
+                if "parse" in str(e).lower() or "syntax" in str(e).lower():
+                    logger.error(f"Invalid JSONPath syntax for {var_name}: '{path}' - {e}")
+                    continue
+                else:
+                    logger.warning(
+                        f"JSONPath extraction failed for {var_name} with path '{path}': {e}"
+                    )
+                    result[var_name] = None
         return result
 
 
 class FunctionNodeAgent(BaseFlowAgent):
-    """Enhanced function node agent with improved error handling and flexibility."""
-
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self._function_result: Optional[Any] = None
         self._execution_error: Optional[Exception] = None
         self._executor: Optional[ToolExecutor] = None
+        self._async_tasks: list[asyncio.Task[Any]] = []
 
-        # Create transition evaluator for function result evaluation
         provider = FlowContextVariableProvider(self.flow_context)
         self._transition_evaluator = TransitionEvaluator(provider)
 
     async def _on_enter_node(self) -> None:
-        # Validate node configuration
         if not hasattr(self.node, "tool_id"):
             await self._handle_function_error(
                 ValueError("Function node missing tool_id configuration")
             )
             return
 
-        # Speak during execution if configured
         if getattr(self.node, "speak_during_execution", False):
             message = (
                 self.node.instruction.text
@@ -165,26 +243,27 @@ class FunctionNodeAgent(BaseFlowAgent):
             self.session.say(message)
 
         try:
-            logger.info(f"Executing function {self.node.tool_id} for node {self.node.id}")
-
-            # Get function definition
-            function_def = self.flow_runner.get_function_definition(self.node.tool_id)
+            if not getattr(self.node, "tool_id", None):
+                raise ValueError("Function node missing tool_id")
+            tool_id = cast(str, self.node.tool_id)
+            function_def = self.flow_runner.get_function_definition(tool_id)
             if not function_def:
-                raise ValueError(f"Function {self.node.tool_id} not registered")
+                raise ValueError(f"Function {tool_id} not registered")
+            handler = self.flow_runner.get_function_handler(tool_id)
+            if handler and "handler" not in function_def:
+                function_def = {**function_def, "handler": handler}
 
-            # Prepare arguments
             args = self._prepare_function_arguments(function_def)
 
-            # Check if we should wait for result
             wait_for_result = getattr(self.node, "wait_for_result", True)
 
             if not wait_for_result:
-                # Fire-and-forget mode - execute async and continue
-                asyncio.create_task(self._execute_and_store_async(function_def, args))
+                task = asyncio.create_task(self._execute_and_store_async(function_def, args))
+                self._async_tasks.append(task)
+                self._async_tasks = [t for t in self._async_tasks if not t.done()]
                 self._function_result = None
                 await self._evaluate_and_transition()
             else:
-                # Normal execution - wait for result
                 self._function_result = await self._execute_function(function_def, args)
                 await self._store_result_and_transition()
 
@@ -194,10 +273,8 @@ class FunctionNodeAgent(BaseFlowAgent):
             await self._handle_function_error(e)
 
     def _prepare_function_arguments(self, function_def: dict[str, Any]) -> dict[str, Any]:
-        """Prepare function arguments with improved variable resolution."""
         args = {}
 
-        # Gather all available data sources
         gathered_data = self._collect_gathered_data()
 
         params = function_def.get("parameters", {})
@@ -217,11 +294,9 @@ class FunctionNodeAgent(BaseFlowAgent):
                     f"Required parameter {param_name} not found for function {self.node.tool_id}"
                 )
 
-        logger.info(f"Function {self.node.tool_id} prepared args: {list(args.keys())}")
         return args
 
     def _collect_gathered_data(self) -> dict[str, Any]:
-        """Collect all gathered data from flow context."""
         gathered_data = {}
         for key, value in self.flow_context.variables.items():
             if key.startswith("gathered_data_") and isinstance(value, dict):
@@ -231,20 +306,16 @@ class FunctionNodeAgent(BaseFlowAgent):
     def _resolve_parameter_value(
         self, param_name: str, gathered_data: dict[str, Any]
     ) -> Optional[Any]:
-        """Resolve parameter value from various sources."""
-        # Direct match in gathered data
         if param_name in gathered_data:
             return gathered_data[param_name]
 
         if param_name in self.flow_context.variables:
             return self.flow_context.variables[param_name]
 
-        # Case-insensitive search in gathered data
         for key, val in gathered_data.items():
             if key.lower() == param_name.lower():
                 return val
 
-        # Case-insensitive search in variables
         for key, val in self.flow_context.variables.items():
             if key.lower() == param_name.lower():
                 return val
@@ -252,12 +323,17 @@ class FunctionNodeAgent(BaseFlowAgent):
         return None
 
     async def _execute_function(self, function_def: dict[str, Any], args: dict[str, Any]) -> Any:
-        """Execute function using appropriate executor."""
-        # Get or create executor
         if not self._executor:
-            session = await self.flow_runner.get_http_session()
+            session: aiohttp.ClientSession | None = None
+            try:
+                if function_def.get("type") == "custom" and function_def.get("url"):
+                    session = await self.flow_runner.get_http_session()
+            except Exception:
+                session = None
             self._executor = ToolExecutor(function_def, session)
-
+        deadline_ms = function_def.get("deadline_ms")
+        if isinstance(deadline_ms, (int, float)) and deadline_ms > 0:
+            return await asyncio.wait_for(self._executor(args), timeout=deadline_ms / 1000.0)
         return await self._executor(args)
 
     async def _execute_and_store_async(
@@ -273,7 +349,6 @@ class FunctionNodeAgent(BaseFlowAgent):
                     "timestamp": asyncio.get_event_loop().time(),
                 },
             )
-            logger.info(f"Async function {self.node.tool_id} completed")
         except Exception as e:
             logger.error(f"Async function {self.node.tool_id} failed: {e}")
             self.flow_context.set_variable(
@@ -286,15 +361,16 @@ class FunctionNodeAgent(BaseFlowAgent):
             )
 
     async def _store_result_and_transition(self) -> None:
-        self.flow_context.function_results[self.node.tool_id] = {
+        self.flow_context.function_results[cast(str, self.node.tool_id)] = {
             "node_id": self.node.id,
             "result": self._function_result,
             "timestamp": asyncio.get_event_loop().time(),
         }
 
-        self.flow_context.set_variable(f"tool_result_{self.node.tool_id}", self._function_result)
+        self.flow_context.set_variable(
+            f"tool_result_{cast(str, self.node.tool_id)}", self._function_result
+        )
 
-        logger.info(f"Function {self.node.tool_id} completed successfully")
         await self._evaluate_and_transition()
 
     async def _evaluate_and_transition(self) -> None:
@@ -318,22 +394,6 @@ class FunctionNodeAgent(BaseFlowAgent):
         if isinstance(self._function_result, dict):
             context.update(self._function_result)
 
-        # DEBUG: Log the context and variables available for transition evaluation
-        logger.info(f"DEBUG Function result type: {type(self._function_result)}")
-        logger.info(f"DEBUG Function result: {self._function_result}")
-        logger.info(f"DEBUG Transition context keys: {list(context.keys()) if isinstance(context, dict) else 'not dict'}")
-        logger.info(f"DEBUG Flow context variables: {list(self.flow_context.variables.keys())}")
-        
-        # Also log what variables the edges are looking for
-        for edge in self.node.edges:
-            if hasattr(edge.transition_condition, 'equations') and edge.transition_condition.equations:
-                for eq in edge.transition_condition.equations:
-                    logger.info(f"DEBUG Edge {edge.id} looking for: '{eq.left_operand}' {eq.operator} '{eq.right_operand}'")
-                    # Check if variables exist in context
-                    left_val = context.get(eq.left_operand, "NOT_FOUND")
-                    right_val = self.flow_context.variables.get(eq.right_operand, context.get(eq.right_operand, "NOT_FOUND"))
-                    logger.info(f"DEBUG Variable values: {eq.left_operand}='{left_val}', {eq.right_operand}='{right_val}'")
-
         transition = await self._transition_evaluator.evaluate_transitions(
             edges=self.node.edges,
             user_text=None,
@@ -341,7 +401,6 @@ class FunctionNodeAgent(BaseFlowAgent):
         )
 
         if transition and transition.destination_node_id:
-            logger.info(f"Transitioning from {self.node.id} to {transition.destination_node_id}")
             await self._transition_to_node(transition.destination_node_id)
         else:
             logger.warning(f"Function node {self.node.id} completed but no transition matched")
@@ -377,20 +436,18 @@ class FunctionNodeAgent(BaseFlowAgent):
             )
 
             if transition and transition.destination_node_id:
-                logger.info(f"Taking error edge: {transition.edge_id}")
                 await self._transition_to_node(transition.destination_node_id)
-                return
-
-        logger.warning(f"No error handling edge for function node {self.node.id}")
 
     async def _on_exit_node(self) -> None:
+        await self._cancel_tasks(self._async_tasks, timeout=2.0, phase="function node exit")
+
         summary = {
             "node_id": self.node.id,
             "tool_id": getattr(self.node, "tool_id", "unknown"),
             "had_error": self._execution_error is not None,
             "result_type": type(self._function_result).__name__ if self._function_result else None,
             "was_async": getattr(self.node, "wait_for_result", True) is False,
+            "async_tasks_count": len(self._async_tasks),
         }
 
         self.flow_context.set_variable(f"function_summary_{self.node.id}", summary)
-        logger.debug(f"Exiting function node {self.node.id} with summary: {summary}")

@@ -6,6 +6,7 @@ import logging
 import types
 
 import pytest
+from pytest_asyncio import fixture as async_fixture
 
 from livekit.agents import DEFAULT_API_CONNECT_OPTIONS, utils
 from livekit.agents.cli import log
@@ -122,7 +123,7 @@ def format_async_generator_by_id(gen_id: int) -> str:
     return f"AsyncGenerator id: {gen_id} (object not found)"
 
 
-@pytest.fixture(autouse=True)
+@async_fixture(autouse=True)
 async def fail_on_leaked_tasks():
     tasks_before = set(asyncio.all_tasks())
     async_gens_before = live_async_generators_ids()

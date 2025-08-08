@@ -7,7 +7,7 @@ class NodeType(str, Enum):
     END = "end"
     GATHER_INPUT = "gather_input"
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.value
 
 
@@ -15,7 +15,7 @@ class ToolType(str, Enum):
     CUSTOM = "custom"
     LOCAL = "local"
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.value
 
 
@@ -23,7 +23,7 @@ class InstructionType(str, Enum):
     STATIC_TEXT = "static_text"
     PROMPT = "prompt"
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.value
 
 
@@ -31,7 +31,7 @@ class SpeakerType(str, Enum):
     AGENT = "agent"
     USER = "user"
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.value
 
 

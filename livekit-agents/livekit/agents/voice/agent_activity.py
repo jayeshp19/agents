@@ -98,6 +98,7 @@ class AgentActivity(RecognitionHooks):
 
         self._current_speech: SpeechHandle | None = None
         self._speech_q: list[tuple[int, float, SpeechHandle]] = []
+        self._speech_seq: int = 0  # monotonic sequence for heap stability
 
         # fired when a speech_task finishes or when a new speech_handle is scheduled
         # this is used to wake up the main task when the scheduling state changes
@@ -854,15 +855,9 @@ class AgentActivity(RecognitionHooks):
             )
             return
 
-        while True:
-            try:
-                # negate the priority to make it a max heap
-                heapq.heappush(self._speech_q, (-priority, time.perf_counter_ns(), speech))
-                break
-            except TypeError:
-                # handle TypeError when identical timestamps cause speech comparison failure
-                # with perf_counter_ns(), collisions should be rare
-                pass
+        # negate the priority to make it a max heap; include a monotonic seq for total ordering
+        self._speech_seq += 1
+        heapq.heappush(self._speech_q, (-priority, self._speech_seq, speech))
 
         speech._mark_scheduled()
         self._wake_up_scheduling_task()

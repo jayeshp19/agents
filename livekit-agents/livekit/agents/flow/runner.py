@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -20,6 +21,11 @@ class FlowRunner:
         flow_path: str,
         edge_evaluator_llm: llm.LLM,
         initial_context: Optional[dict[str, Any]] = None,
+        *,
+        max_total_transitions: int = 200,
+        max_node_revisits: int = 20,
+        min_prompt_confidence: float = 0.0,
+        min_prompt_eval_interval_ms: int = 0,
     ):
         self.flow_path = Path(flow_path)
         self.edge_llm = edge_evaluator_llm
@@ -33,43 +39,39 @@ class FlowRunner:
         self._agent_cache: dict[str, Agent] = {}
 
         self._registered_functions: dict[str, dict[str, Any]] = {}
-        self._function_handlers: dict[str, Callable] = {}
+        self._function_handlers: dict[str, Callable[..., Any]] = {}
 
         self._http_session: Optional[aiohttp.ClientSession] = None
+        self._cache_lock = asyncio.Lock()
 
         self._session: Optional[AgentSession] = None
 
+        # Loop protection thresholds
+        self._max_total_transitions = max(1, max_total_transitions)
+        self._max_node_revisits = max(1, max_node_revisits)
+
         # Create transition evaluator
         provider = FlowContextVariableProvider(self.context)
-        self._transition_evaluator = TransitionEvaluator(provider, edge_llm=self.edge_llm)
+        self._transition_evaluator = TransitionEvaluator(
+            provider,
+            edge_llm=self.edge_llm,
+            min_prompt_confidence=min_prompt_confidence,
+            min_prompt_eval_interval_ms=min_prompt_eval_interval_ms,
+        )
 
         logger.info(f"FlowRunner initialized with flow: {self.flow.conversation_flow_id}")
 
     def _load_and_validate_flow(self) -> None:
         try:
             self.flow: FlowSpec = load_flow(str(self.flow_path))
-            self._validate_flow_structure()
+            # Prefer FlowSpec's comprehensive validation
+            structure_errors = self.flow.validate_flow_structure()
+            if structure_errors:
+                raise ValueError("Invalid flow structure: " + "; ".join(structure_errors))
             logger.info(f"Loaded flow with {len(self.flow.nodes)} nodes")
         except Exception as e:
             logger.error(f"Failed to load flow from {self.flow_path}: {e}")
             raise
-
-    def _validate_flow_structure(self) -> None:
-        if not self.flow.start_node_id:
-            raise ValueError("Flow missing start_node_id")
-
-        if self.flow.start_node_id not in self.flow.nodes:
-            raise ValueError(f"Start node '{self.flow.start_node_id}' not found in flow")
-
-        for node_id, node in self.flow.nodes.items():
-            if node.edges:
-                for edge in node.edges:
-                    if edge.destination_node_id and edge.destination_node_id not in self.flow.nodes:
-                        logger.warning(
-                            f"Edge in node '{node_id}' points to non-existent "
-                            f"node '{edge.destination_node_id}'"
-                        )
-                        raise
 
     async def start(self, session: AgentSession) -> None:
         self._session = session
@@ -82,52 +84,70 @@ class FlowRunner:
         start_node = self.flow.nodes.get(self.flow.start_node_id)
         start_name = start_node.name if start_node else self.flow.start_node_id
         logger.info(f"FLOW START: {start_name}")
-        logger.info(f"FLOW PATH: {' -> '.join([node.name for node in self.flow.nodes.values()][:5])}{'...' if len(self.flow.nodes) > 5 else ''}")
+        logger.info(
+            f"FLOW PATH: {' -> '.join([node.name for node in self.flow.nodes.values()][:5])}{'...' if len(self.flow.nodes) > 5 else ''}"
+        )
         await session.start(agent=initial_agent)
 
-    async def get_or_create_agent(self, node_id: str) -> Optional[Agent]:
-        if node_id in self._agent_cache:
-            cached_agent = self._agent_cache[node_id]
-            cached_node = self.flow.nodes.get(node_id)
-            logger.debug(f"CACHE: {cached_node.name if cached_node else node_id}")
-            return cached_agent
+    # ---- Loop protection helpers ----
+    def can_transition_to(self, node_id: str) -> bool:
+        """Return False if transition exceeds configured limits."""
+        # Total hops limit
+        if self.context.total_transitions >= self._max_total_transitions:
+            return False
+        # Per-node revisit limit
+        if self.context.transition_counts.get(node_id, 0) >= self._max_node_revisits:
+            return False
+        return True
 
-        node = self.flow.nodes.get(node_id)
-        if not node:
-            logger.error(f"Node {node_id} not found in flow")
-            return None
-
+    def find_end_node_id(self) -> Optional[str]:
         try:
-            agent = self._create_agent_for_node(node)
+            for nid, node in self.flow.nodes.items():
+                if str(node.type) == "end":
+                    return nid
+        except Exception:
+            pass
+        return None
 
-            self._agent_cache[node_id] = agent
+    async def get_or_create_agent(self, node_id: str) -> Optional[Agent]:
+        async with self._cache_lock:
+            if node_id in self._agent_cache:
+                cached_agent = self._agent_cache[node_id]
+                return cached_agent
 
-            logger.debug(f"CREATE: {node.name}")
-            return agent
+            node = self.flow.nodes.get(node_id)
+            if not node:
+                logger.error(f"Node {node_id} not found in flow")
+                return None
 
-        except Exception as e:
-            logger.error(f"Failed to create agent for node {node_id} ({node.name}): {e}")
-            return None
+            try:
+                agent = self._create_agent_for_node(node)
+                self._agent_cache[node_id] = agent
+                return agent
+
+            except Exception as e:
+                logger.error(f"Failed to create agent for node {node_id} ({node.name}): {e}")
+                return None
 
     def _create_agent_for_node(self, node: Node) -> Agent:
-        agent_kwargs = {
-            "node": node,
-            "flow_runner": self,
-            "flow_context": self.context,
-        }
-
-        if node.type == "conversation":
-            return ConversationNodeAgent(**agent_kwargs)
-        elif node.type == "gather_input":
-            return GatherInputNode(extraction_llm=self.edge_llm, **agent_kwargs)
-        elif node.type == "function":
-            return FunctionNodeAgent(**agent_kwargs)
-        elif node.type == "end":
-            return ConversationNodeAgent(**agent_kwargs)
+        node_type = str(node.type)
+        if node_type == "conversation":
+            return ConversationNodeAgent(node=node, flow_runner=self, flow_context=self.context)
+        elif node_type == "gather_input":
+            return GatherInputNode(
+                extraction_llm=self.edge_llm,
+                node=node,
+                flow_runner=self,
+                flow_context=self.context,
+            )
+        elif node_type == "function":
+            return FunctionNodeAgent(node=node, flow_runner=self, flow_context=self.context)
+        elif node_type == "end":
+            return ConversationNodeAgent(node=node, flow_runner=self, flow_context=self.context)
         else:
             raise ValueError(f"Unknown node type: {node.type}")
 
-    def register_function(self, tool_id: str, handler: Callable) -> None:
+    def register_function(self, tool_id: str, handler: Callable[..., Any]) -> None:
         self._function_handlers[tool_id] = handler
         logger.debug(f"Registered function handler for {tool_id}")
 
@@ -156,19 +176,51 @@ class FlowRunner:
         return self._function_handlers.get(tool_id)
 
     async def get_http_session(self) -> aiohttp.ClientSession:
-        if self._http_session is None or self._http_session.closed:
-            timeout = aiohttp.ClientTimeout(total=300)
-            self._http_session = aiohttp.ClientSession(timeout=timeout)
+        async with self._cache_lock:  # Reuse cache lock for HTTP session
+            if self._http_session is None or self._http_session.closed:
+                timeout = aiohttp.ClientTimeout(total=300)
+                connector = aiohttp.TCPConnector(
+                    limit=100,  # Total connection pool size
+                    limit_per_host=30,  # Per host limit
+                    ttl_dns_cache=300,  # DNS cache TTL
+                    use_dns_cache=True,
+                )
+                self._http_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
+                logger.debug("Created new HTTP session with connection limits")
 
         return self._http_session
 
     async def cleanup(self) -> None:
+        """Cleanup resources with timeout and error handling."""
+        cleanup_tasks = []
+
+        # HTTP session cleanup
         if self._http_session and not self._http_session.closed:
-            await self._http_session.close()
+            cleanup_tasks.append(self._cleanup_http_session())
+
+        # Execute cleanup tasks with timeout
+        if cleanup_tasks:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*cleanup_tasks, return_exceptions=True), timeout=10.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning("HTTP session cleanup timed out")
+            except Exception as e:
+                logger.error(f"Error during HTTP session cleanup: {e}")
 
         self._agent_cache.clear()
-
         logger.info("FlowRunner cleanup completed")
+
+    async def _cleanup_http_session(self) -> None:
+        try:
+            if self._http_session is not None:
+                await self._http_session.close()
+            # Wait a bit for connections to close properly
+            await asyncio.sleep(0.1)
+            logger.debug("HTTP session closed successfully")
+        except Exception as e:
+            logger.warning(f"Error closing HTTP session: {e}")
 
     async def evaluate_transition(
         self, node: Node, user_text: Optional[str] = None

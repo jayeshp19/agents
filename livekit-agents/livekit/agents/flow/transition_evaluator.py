@@ -1,15 +1,15 @@
-import ast
 import json
 import logging
+import time
 from typing import Any, Optional, Protocol
 
-from jsonpath_ng import parse as jsonpath_parse  # type: ignore[import-untyped]
+from jsonpath_ng import parse as jsonpath_parse
 
 from livekit.agents import llm
 
 from .base import FlowTransition
 from .fields import Edge, Equation, TransitionCondition
-from .utils.utils import clean_json_response
+from .utils.utils import clean_json_response, stream_chat_to_text
 
 logger = logging.getLogger(__name__)
 
@@ -19,9 +19,21 @@ class VariableProvider(Protocol):
 
 
 class TransitionEvaluator:
-    def __init__(self, variable_provider: VariableProvider, edge_llm: Optional[llm.LLM] = None):
+    def __init__(
+        self,
+        variable_provider: VariableProvider,
+        edge_llm: Optional[llm.LLM[Any]] = None,
+        *,
+        min_prompt_confidence: float = 0.0,
+        min_prompt_eval_interval_ms: int = 0,
+    ):
         self.variable_provider = variable_provider
         self.edge_llm = edge_llm
+        # Minimum confidence required for prompt-based transitions (0..1)
+        self.min_prompt_confidence = max(0.0, min(1.0, min_prompt_confidence))
+        # Minimum interval between prompt evaluations
+        self._min_prompt_eval_interval = max(0, int(min_prompt_eval_interval_ms)) / 1000.0
+        self._last_prompt_eval_ts: float = 0.0
 
     async def evaluate_transitions(
         self,
@@ -42,6 +54,7 @@ class TransitionEvaluator:
                     logger.info(
                         f"Equation transition matched: {edge.condition} -> {edge.destination_node_id}"
                     )
+                    assert edge.destination_node_id is not None
                     return FlowTransition(
                         destination_node_id=edge.destination_node_id,
                         edge_id=edge.id,
@@ -50,7 +63,7 @@ class TransitionEvaluator:
                         user_text=user_text,
                     )
 
-        if user_text and self.edge_llm:
+        if user_text and self.edge_llm is not None:
             prompt_edges = [
                 edge
                 for edge in edges
@@ -63,12 +76,32 @@ class TransitionEvaluator:
                 transition = await self._evaluate_prompt_transitions(prompt_edges, user_text)
                 if transition:
                     return transition
+        elif user_text:
+            prompt_edges = [
+                edge
+                for edge in edges
+                if edge.transition_condition and edge.transition_condition.type == "prompt"
+            ]
+            if prompt_edges:
+                edge_ids = ", ".join(e.id for e in prompt_edges)
+                logger.warning(
+                    "Prompt transitions present (%s) but no edge_evaluator_llm configured; "
+                    "these edges cannot be evaluated via prompt conditions.",
+                    edge_ids,
+                )
 
         return None
 
     async def _evaluate_prompt_transitions(
         self, edges: list[Edge], user_text: str
     ) -> Optional[FlowTransition]:
+        assert self.edge_llm is not None
+        now = time.time()
+        if (
+            self._min_prompt_eval_interval > 0
+            and (now - self._last_prompt_eval_ts) < self._min_prompt_eval_interval
+        ):
+            return None
         all_options = []
         option_map = {}
 
@@ -87,35 +120,30 @@ Available transitions:
 {json.dumps(all_options, indent=2)}
 
 Analyze the user's input and determine which transition condition best matches their intent.
-Return the option number if there's a clear match, or 0 if none match well.
+Return the option number if there's a clear match, or 0 if none match well. Also return a confidence score (0..1).
 
 Respond with JSON only:
-{{"option": <number>}}'''
+{{"option": <number>, "confidence": <float between 0 and 1>}}'''
 
         try:
-            ctx = llm.ChatContext()
-            ctx.add_message(role="user", content=prompt)
-
-            response_text = ""
-            async with self.edge_llm.chat(chat_ctx=ctx) as stream:
-                async for chunk in stream:
-                    if chunk.delta and chunk.delta.content:
-                        response_text += chunk.delta.content
+            response_text = await stream_chat_to_text(self.edge_llm, prompt)
 
             response_text = clean_json_response(response_text)
             result = json.loads(response_text)
-
             selected = result.get("option", 0)
-            if selected and selected in option_map:
+            confidence = float(result.get("confidence", 0.9))
+            self._last_prompt_eval_ts = time.time()
+            if selected and selected in option_map and confidence >= self.min_prompt_confidence:
                 edge = option_map[selected]
                 logger.info(
                     f"Prompt transition selected: {edge.transition_condition.prompt} (option {selected})"
                 )
 
+                assert edge.destination_node_id is not None
                 return FlowTransition(
                     destination_node_id=edge.destination_node_id,
                     edge_id=edge.id,
-                    confidence=0.9,
+                    confidence=confidence,
                     reasoning=f"User input matched: {edge.transition_condition.prompt}",
                     user_text=user_text,
                 )
@@ -133,30 +161,23 @@ Respond with JSON only:
 
         eval_context = self._build_evaluation_context(context)
 
-        # Normalize operator (handle "OR", "or", "||", etc.)
         op_group = (condition.operator or "AND").upper()
 
         if op_group in {"OR", "||"}:
-            # ANY equation must match
             return any(
                 self._evaluate_single_equation(eq, eval_context) for eq in condition.equations
             )
         else:
-            # Default to AND - ALL equations must match
             return all(
                 self._evaluate_single_equation(eq, eval_context) for eq in condition.equations
             )
 
     def _evaluate_single_equation(self, equation: Equation, context: dict[str, Any]) -> bool:
-        """Evaluate a single equation against the context."""
         try:
-            # Get the left operand value
             left_value = self._resolve_value(equation.left_operand, context)
-            # Also resolve the right operand value
             right_value = self._resolve_value(equation.right_operand, context)
             operator = equation.operator
 
-            # Handle None values
             if left_value is None:
                 return operator == "==" and right_value in ["null", "None", None]
 
@@ -171,33 +192,57 @@ Respond with JSON only:
             return False
 
     def _resolve_value(self, operand: str, context: dict[str, Any]) -> Any:
-        """
-        Resolve a value using JSONPath expression.
-        Falls back to variable provider if not found in context.
-        """
-        try:
-            # Try JSONPath first (supports dot notation and more complex paths)
-            matches = jsonpath_parse(operand).find(context)
-            if matches:
-                return matches[0].value
-        except Exception:
-            # JSONPath failed, try direct lookup
-            if operand in context:
-                return context[operand]
+        if not isinstance(operand, str):
+            return operand
 
-        # Fall back to variable provider
-        return self.variable_provider.get_variable(operand)
+        looks_like_jsonpath = any(ch in operand for ch in ("$", "@", ".", "[", "]", "*"))
+
+        if len(operand) > 256:
+            looks_like_jsonpath = False
+
+        if looks_like_jsonpath:
+            try:
+                matches = jsonpath_parse(operand).find(context)
+                if matches:
+                    return matches[0].value
+            except Exception:
+                pass
+
+        if operand in context:
+            return context[operand]
+
+        val = self.variable_provider.get_variable(operand)
+        if val is not None:
+            return val
+
+        return operand
 
     def _coerce_value(self, value: str) -> Any:
+        """Conservatively coerce simple scalar types; otherwise return string.
+
+        Only supports: int, float, booleans (true/false/yes/no/1/0), and null/none.
+        Lists/dicts are returned as-is (string) to avoid unintended evaluations.
         """
-        Try to coerce a string value to its proper type.
-        Uses ast.literal_eval for safe evaluation.
-        """
+        if value is None:
+            return None
+        if isinstance(value, (int, float, bool)):
+            return value
+        if not isinstance(value, str):
+            return value
+
+        lower = value.strip().lower()
+        if lower in {"none", "null"}:
+            return None
+        if lower in {"true", "yes", "1"}:
+            return True
+        if lower in {"false", "no", "0"}:
+            return False
+        # numeric
         try:
-            # Try to parse as Python literal (handles int, float, bool, None, list, dict)
-            return ast.literal_eval(value)
-        except (ValueError, SyntaxError):
-            # Return as string if parsing fails
+            if "." in lower:
+                return float(lower)
+            return int(lower)
+        except ValueError:
             return value
 
     def _to_bool(self, value: Any) -> bool:
@@ -267,6 +312,48 @@ Respond with JSON only:
                 return left_str.lower().startswith(right.lower())
             elif operator == "endswith":
                 return left_str.lower().endswith(right.lower())
+
+        # Case-insensitive equality/inequality for strings
+        if operator in ["==~", "!=~"] and isinstance(left, str):
+            left_lower = left.lower()
+            right_lower = (
+                str(right_value).lower()
+                if not isinstance(right_value, str)
+                else right_value.lower()
+            )
+            if operator == "==~":
+                return left_lower == right_lower
+            else:
+                return left_lower != right_lower
+
+        # Regex matches
+        if operator in ["matches", "matches_i"] and isinstance(left, str):
+            try:
+                flags = 0
+                pattern = str(right_value)
+                if operator == "matches_i":
+                    import re
+
+                    flags = re.IGNORECASE
+                import re
+
+                return re.search(pattern, left, flags) is not None
+            except Exception:
+                return False
+
+        # Membership tests
+        if operator == "in":
+            # List/tuple/set membership
+            if isinstance(right_value, (list, tuple, set)):
+                return left in right_value or str(left) in {str(v) for v in right_value}
+            # Comma-separated string list
+            if isinstance(right_value, str) and "," in right_value:
+                tokens = [t.strip() for t in right_value.split(",") if t.strip()]
+                return str(left) in tokens
+            # Fallback: substring containment if both strings
+            if isinstance(left, str) and isinstance(right_value, str):
+                return left in right_value
+            return False
 
         # Numeric comparisons
         if operator in [">", "<", ">=", "<=", "==", "!="]:

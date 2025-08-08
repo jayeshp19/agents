@@ -1,0 +1,385 @@
+{
+  "conversation_flow_id": "advanced_test_flow",
+  "version": 1,
+  "global_prompt": "You are Alex, a technical support agent for CloudSync Pro. Keep context across turns, ask concise clarifying questions, and prefer safe, reversible fixes. If the user requests a human at any point, politely acknowledge and proceed to handoff.",
+  "nodes": [
+    {
+      "id": "start-conversation",
+      "name": "Initial Support",
+      "type": "conversation",
+      "instruction": {
+        "type": "static_text",
+        "text": "Hello! I'm Alex from CloudSync Pro support. I can help with sync, login, or performance issues. What seems to be the problem?"
+      },
+      "edges": [
+        {
+          "id": "edge-to-gather",
+          "condition": "user describes issue",
+          "transition_condition": {
+            "type": "prompt",
+            "prompt": "user mentions a sync/login/performance issue or asks for help"
+          },
+          "destination_node_id": "gather-details"
+        }
+      ]
+    },
+    {
+      "id": "gather-details",
+      "name": "Gather Customer Details",
+      "type": "gather_input",
+      "gather_input_instruction": "To help troubleshoot, I need a couple of details.",
+      "gather_input_variables": [
+        {
+          "name": "customer_email",
+          "type": "email",
+          "description": "Customer's email address",
+          "required": true
+        },
+        {
+          "name": "issue_description",
+          "type": "string",
+          "description": "Short description of the issue",
+          "required": true
+        },
+        {
+          "name": "priority",
+          "type": "string",
+          "description": "Customer-stated priority (low/medium/high)",
+          "required": false
+        },
+        {
+          "name": "error_code",
+          "type": "string",
+          "description": "Optional app error code like CS-1234",
+          "required": false,
+          "regex_pattern": "^CS-[0-9]{4}$",
+          "regex_error_message": "Please provide an error like CS-1234"
+        }
+      ],
+      "edges": [
+        {
+          "id": "edge-to-triage",
+          "condition": "data collected",
+          "transition_condition": { "type": "prompt", "prompt": "always true" },
+          "destination_node_id": "triage-issue"
+        }
+      ]
+    },
+    {
+      "id": "triage-issue",
+      "name": "Triage Issue",
+      "type": "function",
+      "tool_id": "triage-tool",
+      "speak_during_execution": true,
+      "wait_for_result": true,
+      "instruction": { "type": "static_text", "text": "Let me quickly triage this based on what you shared..." },
+      "edges": [
+        {
+          "id": "edge-critical",
+          "condition": "critical or high priority",
+          "transition_condition": {
+            "type": "equation",
+            "equations": [
+              { "left_operand": "issue_severity", "operator": "==", "right_operand": "critical" },
+              { "left_operand": "priority", "operator": "==~", "right_operand": "high" }
+            ],
+            "operator": "OR"
+          },
+          "destination_node_id": "create-ticket"
+        },
+        {
+          "id": "edge-unverified",
+          "condition": "customer not verified",
+          "transition_condition": {
+            "type": "equation",
+            "equations": [
+              { "left_operand": "customer_verified", "operator": "==", "right_operand": "false" }
+            ]
+          },
+          "destination_node_id": "verify-identity"
+        },
+        {
+          "id": "edge-normal",
+          "condition": "normal path",
+          "transition_condition": {
+            "type": "equation",
+            "equations": [
+              { "left_operand": "issue_severity", "operator": "in", "right_operand": "allowed_severities" }
+            ]
+          },
+          "destination_node_id": "provide-solution"
+        }
+      ]
+    },
+    {
+      "id": "verify-identity",
+      "name": "Verify Identity",
+      "type": "gather_input",
+      "gather_input_instruction": "For security, please share the last 4 digits of your card on file or your account PIN.",
+      "gather_input_variables": [
+        {
+          "name": "verification_code",
+          "type": "string",
+          "description": "Last 4 digits or PIN",
+          "required": true,
+          "regex_pattern": "^[0-9]{4}$",
+          "regex_error_message": "Please enter exactly 4 digits"
+        }
+      ],
+      "edges": [
+        {
+          "id": "edge-check-verification",
+          "condition": "collected",
+          "transition_condition": { "type": "prompt", "prompt": "always true" },
+          "destination_node_id": "check-verification"
+        }
+      ]
+    },
+    {
+      "id": "check-verification",
+      "name": "Check Verification",
+      "type": "function",
+      "tool_id": "check-verification-tool",
+      "wait_for_result": true,
+      "edges": [
+        {
+          "id": "edge-verified",
+          "condition": "verified",
+          "transition_condition": {
+            "type": "equation",
+            "equations": [ { "left_operand": "verified", "operator": "matches", "right_operand": "^[0-9]{4}$" } ]
+          },
+          "destination_node_id": "provide-solution"
+        },
+        {
+          "id": "edge-failed",
+          "condition": "failed",
+          "transition_condition": {
+            "type": "equation",
+            "equations": [ { "left_operand": "verified", "operator": "==", "right_operand": "false" } ]
+          },
+          "destination_node_id": "security-block"
+        }
+      ]
+    },
+    {
+      "id": "provide-solution",
+      "name": "Provide Solution",
+      "type": "conversation",
+      "instruction": {
+        "type": "prompt",
+        "text": "Based on triage results and the user's description, propose clear next-step instructions. If a simple client setting reset would help, offer to apply it."
+      },
+      "edges": [
+        {
+          "id": "edge-apply-fix",
+          "condition": "user agrees to apply fix",
+          "transition_condition": { "type": "prompt", "prompt": "user says yes or okay" },
+          "destination_node_id": "apply-fix"
+        },
+        {
+          "id": "edge-escalate",
+          "condition": "user wants escalation",
+          "transition_condition": { "type": "prompt", "prompt": "user asks for escalation or human" },
+          "destination_node_id": "create-ticket"
+        }
+      ],
+      "skip_response_edge": {
+        "id": "edge-skip-when-no-issue",
+        "condition": "auto when no issue",
+        "transition_condition": {
+          "type": "equation",
+          "equations": [ { "left_operand": "issue_severity", "operator": "==", "right_operand": "none" } ]
+        },
+        "destination_node_id": "end-success"
+      }
+    },
+    {
+      "id": "apply-fix",
+      "name": "Apply Fix",
+      "type": "function",
+      "tool_id": "apply-fix-tool",
+      "speak_during_execution": true,
+      "wait_for_result": true,
+      "instruction": { "type": "static_text", "text": "Applying the fix now. This should only take a moment..." },
+      "edges": [
+        {
+          "id": "edge-fix-success",
+          "condition": "success",
+          "transition_condition": {
+            "type": "equation",
+            "equations": [ { "left_operand": "success", "operator": "contains", "right_operand": "@" } ]
+          },
+          "destination_node_id": "confirm-resolution"
+        },
+        {
+          "id": "edge-fix-fail",
+          "condition": "fail",
+          "transition_condition": {
+            "type": "equation",
+            "equations": [ { "left_operand": "success", "operator": "==", "right_operand": "false" } ]
+          },
+          "destination_node_id": "create-ticket"
+        }
+      ]
+    },
+    {
+      "id": "confirm-resolution",
+      "name": "Confirm Resolution",
+      "type": "conversation",
+      "instruction": { "type": "static_text", "text": "Everything should be set. Can you confirm it's working now?" },
+      "edges": [
+        {
+          "id": "edge-resolved",
+          "condition": "user confirms",
+          "transition_condition": { "type": "prompt", "prompt": "user says it's fixed or working" },
+          "destination_node_id": "end-success"
+        },
+        {
+          "id": "edge-still-broken",
+          "condition": "user says not fixed",
+          "transition_condition": { "type": "prompt", "prompt": "user says still broken or not working" },
+          "destination_node_id": "create-ticket"
+        }
+      ]
+    },
+    {
+      "id": "create-ticket",
+      "name": "Create Support Ticket",
+      "type": "function",
+      "tool_id": "create-ticket-tool",
+      "speak_during_execution": true,
+      "wait_for_result": true,
+      "instruction": { "type": "static_text", "text": "I'll create a support ticket with your details and next steps." },
+      "edges": [
+        {
+          "id": "edge-ticket-created",
+          "condition": "ticket created",
+          "transition_condition": {
+            "type": "equation",
+            "equations": [ { "left_operand": "ticket_id", "operator": "matches", "right_operand": "^https?://" } ]
+          },
+          "destination_node_id": "end-with-ticket"
+        }
+      ]
+    },
+    {
+      "id": "handoff",
+      "name": "Human Handoff",
+      "type": "conversation",
+      "instruction": { "type": "static_text", "text": "I’ll connect you with a human specialist now. One moment please." },
+      "global_node_setting": { "condition": "user requests a human or live agent" },
+      "edges": [
+        {
+          "id": "edge-handoff-end",
+          "condition": "handoff complete",
+          "transition_condition": { "type": "prompt", "prompt": "handoff done" },
+          "destination_node_id": "end-handoff"
+        }
+      ]
+    },
+    { "id": "security-block", "name": "Security Block", "type": "end", "instruction": { "type": "static_text", "text": "Sorry, I can't proceed without verification. Please contact security@cloudsync.pro." } },
+    { "id": "end-success", "name": "Success", "type": "end", "instruction": { "type": "static_text", "text": "Glad we could help! Have a great day." } },
+    { 
+      "id": "end-with-ticket", 
+      "name": "Ticket Created", 
+      "type": "conversation", 
+      "instruction": { "type": "static_text", "text": "Your ticket {{ticket_id}} is created. Our team will follow up shortly." },
+      "edges": [
+        {
+          "id": "edge-request-human",
+          "condition": "user requests human",
+          "transition_condition": { "type": "prompt", "prompt": "user requests a human or live agent" },
+          "destination_node_id": "handoff"
+        }
+      ]
+    },
+    { "id": "end-handoff", "name": "Human Handoff Complete", "type": "end", "instruction": { "type": "static_text", "text": "You've been connected to our human support team. Thank you for using CloudSync Pro." } }
+  ],
+  "start_node_id": "start-conversation",
+  "start_speaker": "agent",
+  "tools": [
+    {
+      "tool_id": "triage-tool",
+      "name": "triage_issue",
+      "type": "local",
+      "description": "Classify issue severity and check if customer appears verified from context",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "customer_email": { "type": "string" },
+          "issue_description": { "type": "string" },
+          "priority": { "type": "string" }
+        },
+        "required": ["customer_email", "issue_description"]
+      }
+    },
+    {
+      "tool_id": "check-verification-tool",
+      "name": "check_verification",
+      "type": "custom",
+      "description": "Validate a 4-digit verification code for an account",
+      "url": "https://httpbin.org/post",
+      "http_method": "POST",
+      "headers": { "Content-Type": "application/json" },
+      "parameter_type": "json",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "customer_email": { "type": "string" },
+          "verification_code": { "type": "string" }
+        },
+        "required": ["customer_email", "verification_code"]
+      },
+      "response_variables": {
+        "verified": "$.json.verification_code",
+        "echo_email": "$.json.customer_email"
+      },
+      "timeout_ms": 5000
+    },
+    {
+      "tool_id": "apply-fix-tool",
+      "name": "apply_fix",
+      "type": "custom",
+      "description": "Apply a safe client setting reset or cache clear",
+      "url": "https://httpbin.org/post",
+      "http_method": "POST",
+      "headers": { "Content-Type": "application/json" },
+      "parameter_type": "json",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "customer_email": { "type": "string" },
+          "fix_type": { "type": "string" },
+          "notes": { "type": "string" }
+        },
+        "required": ["customer_email", "fix_type"]
+      },
+      "response_variables": { "success": "$.json.customer_email" },
+      "timeout_ms": 10000
+    },
+    {
+      "tool_id": "create-ticket-tool",
+      "name": "create_ticket",
+      "type": "custom",
+      "description": "Create a support ticket with context and priority",
+      "url": "https://httpbin.org/post",
+      "http_method": "POST",
+      "headers": { "Content-Type": "application/json" },
+      "parameter_type": "json",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "customer_email": { "type": "string" },
+          "issue_description": { "type": "string" },
+          "priority": { "type": "string" }
+        },
+        "required": ["customer_email", "issue_description"]
+      },
+      "response_variables": { "ticket_id": "$.url" },
+      "timeout_ms": 10000
+    }
+  ],
+  "model_choice": { "type": "primary", "model": "gpt-4o" },
+  "is_published": false
+}

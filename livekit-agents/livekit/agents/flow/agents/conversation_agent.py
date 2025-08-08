@@ -11,8 +11,6 @@ logger = logging.getLogger(__name__)
 class ConversationNodeAgent(BaseFlowAgent):
     async def _on_enter_node(self) -> None:
         if self.node.skip_response_edge and self.node.skip_response_edge.destination_node_id:
-            logger.info(f"SKIP: {self.node.name} -> [Auto-transition]")
-
             transition = FlowTransition(
                 destination_node_id=self.node.skip_response_edge.destination_node_id,
                 edge_id=self.node.skip_response_edge.id,
@@ -33,33 +31,23 @@ class ConversationNodeAgent(BaseFlowAgent):
             return
 
         if self.node.instruction and self.node.instruction.type == "prompt":
-            logger.debug(f"READY: {self.node.name}")
             self.session.generate_reply(instructions=self.node.instruction.text)
 
     async def on_user_turn_completed(
         self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage
     ) -> None:
         if self._transition_pending:
-            logger.debug(
-                f"Transition already pending for node {self.node.id} ({self.node.name}), ignoring turn"
-            )
             return
 
         try:
             user_text = new_message.text_content or ""
-
-            logger.info(f"USER [{self.node.name}]: '{user_text}'")
 
             self.flow_context.add_message(new_message)
 
             transition = await self._evaluate_transition(user_text)
 
             if transition and transition.destination_node_id:
-                dest_node = self.flow_runner.flow.nodes.get(transition.destination_node_id)
-                dest_name = dest_node.name if dest_node else transition.destination_node_id
-                logger.info(f"FLOW: {self.node.name} -> {dest_name} ({transition.reasoning})")
-
-                self.session.interrupt()
+                await self._try_interrupt(timeout=0.2)
 
                 self.flow_context.set_variable(
                     f"transition_from_{self.node.id}",
@@ -74,13 +62,9 @@ class ConversationNodeAgent(BaseFlowAgent):
 
                 await self._transition_to_node(transition.destination_node_id)
 
-                # Raise StopResponse to prevent LLM from generating a response
                 raise StopResponse()
-            else:
-                logger.debug(f"CONTINUE: {self.node.name}")
 
         except StopResponse:
-            # Re-raise StopResponse to prevent agent from generating a response
             raise
         except Exception as e:
             logger.error(
@@ -97,7 +81,3 @@ class ConversationNodeAgent(BaseFlowAgent):
         }
 
         self.flow_context.set_variable(f"conversation_summary_{self.node.id}", conversation_summary)
-
-        logger.debug(
-            f"Exiting conversation node {self.node.id} ({self.node.name}) with summary: {conversation_summary}"
-        )
