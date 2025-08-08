@@ -5,47 +5,37 @@ import time
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from .utils import parse_dataclass
+
 
 @dataclass
 class Instruction:
-    type: Literal["static_text", "prompt"]
-    text: str
+    type: Literal["static_text", "prompt"] = "prompt"
+    text: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.text.strip():
+            raise ValueError("Instruction text cannot be empty")
 
     @staticmethod
     def from_dict(d: dict[str, Any]) -> Instruction:
-        if not isinstance(d, dict):
-            raise ValueError("Instruction must be a dictionary")
-
-        instruction_type = d.get("type", "prompt")
-        text = d.get("text", "")
-
-        if not text:
-            raise ValueError("Instruction text is required")
-
-        return Instruction(type=instruction_type, text=text)
+        return parse_dataclass(Instruction, d)
 
 
 @dataclass
 class Equation:
-    left_operand: str
-    operator: str
-    right_operand: str
+    left_operand: str = ""
+    operator: str = ""
+    right_operand: str = ""
 
     @staticmethod
     def from_dict(d: dict[str, Any]) -> Equation:
-        if not isinstance(d, dict):
-            raise ValueError("Equation must be a dictionary")
-
-        return Equation(
-            left_operand=d.get("left_operand", ""),
-            operator=d.get("operator", ""),
-            right_operand=d.get("right_operand", ""),
-        )
+        return parse_dataclass(Equation, d)
 
 
 @dataclass
 class TransitionCondition:
-    type: Literal["prompt", "equation"]
+    type: Literal["prompt", "equation"] = "prompt"
     prompt: str | None = None
     equations: list[Equation] | None = None
     operator: str | None = None
@@ -58,33 +48,14 @@ class TransitionCondition:
 
     @staticmethod
     def from_dict(d: dict[str, Any]) -> TransitionCondition:
-        if not isinstance(d, dict):
-            raise ValueError("TransitionCondition must be a dictionary")
-
-        condition_type = d.get("type", "")
-        prompt = d.get("prompt", None)  # Use None as default, not empty string
-        equations = d.get("equations", None)
-        operator = d.get("operator", None)
-
-        if not prompt and not equations:
-            raise ValueError("Transition condition prompt or equation is required")
-
-        if equations:
-            equations = [Equation.from_dict(e) for e in equations]
-
-        return TransitionCondition(
-            type=condition_type,
-            prompt=prompt,
-            equations=equations,
-            operator=operator,
-        )
+        return parse_dataclass(TransitionCondition, d)
 
 
 @dataclass
 class Edge:
-    id: str
-    condition: str
-    transition_condition: TransitionCondition
+    id: str = ""
+    condition: str = ""
+    transition_condition: TransitionCondition | None = None
     destination_node_id: str | None = None
 
     def __post_init__(self) -> None:
@@ -97,35 +68,12 @@ class Edge:
 
     @staticmethod
     def from_dict(d: dict[str, Any]) -> Edge:
-        if not isinstance(d, dict):
-            raise ValueError("Edge must be a dictionary")
-
-        edge_id = d.get("id", "")
-        condition = d.get("condition", "")
-
-        if not edge_id:
-            raise ValueError("Edge ID is required")
-        if not condition:
-            raise ValueError("Edge condition is required")
-
-        tc_data = d.get("transition_condition", None)
-        if not tc_data:
-            raise ValueError("Edge transition_condition is required")
-
-        if not isinstance(tc_data, dict):
-            raise ValueError("Edge transition_condition must be a dictionary")
-
-        return Edge(
-            id=edge_id,
-            condition=condition,
-            transition_condition=TransitionCondition.from_dict(tc_data),
-            destination_node_id=d.get("destination_node_id"),
-        )
+        return parse_dataclass(Edge, d)
 
 
 @dataclass
 class GlobalNodeSetting:
-    condition: str
+    condition: str = ""
 
     def __post_init__(self) -> None:
         if not self.condition.strip():
@@ -133,19 +81,12 @@ class GlobalNodeSetting:
 
     @staticmethod
     def from_dict(d: dict[str, Any]) -> GlobalNodeSetting:
-        if not isinstance(d, dict):
-            raise ValueError("GlobalNodeSetting must be a dictionary")
-
-        condition = d.get("condition", "")
-        if not condition:
-            raise ValueError("Global node setting condition is required")
-
-        return GlobalNodeSetting(condition=condition)
+        return parse_dataclass(GlobalNodeSetting, d)
 
 
 @dataclass
 class GatherInputVariable:
-    name: str
+    name: str = ""
     type: Literal[
         "string",
         "email",
@@ -157,8 +98,8 @@ class GatherInputVariable:
         "url",
         "boolean",
         "custom",
-    ]
-    description: str
+    ] = "string"
+    description: str = ""
     required: bool = False
     max_attempts: int = 3
     regex_pattern: str | None = None
@@ -274,37 +215,23 @@ class GatherInputVariable:
 
     @staticmethod
     def from_dict(d: dict[str, Any]) -> GatherInputVariable:
-        if not isinstance(d, dict):
-            raise ValueError("GatherInputVariable must be a dictionary")
-
-        name = d.get("name", "")
-        if not name:
-            raise ValueError("Gather input variable name is required")
-
-        return GatherInputVariable(
-            name=name,
-            type=d.get("type", "string"),
-            description=d.get("description", ""),
-            required=d.get("required", False),
-            max_attempts=d.get("max_attempts", 3),
-            regex_pattern=d.get("regex_pattern"),
-            regex_error_message=d.get("regex_error_message"),
-        )
+        return parse_dataclass(GatherInputVariable, d)
 
 
 @dataclass
 class TransferDestination:
     """Transfer destination configuration."""
 
-    number: str
+    number: str = ""
     sip_uri: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.number.strip():
+            raise ValueError("Transfer destination number cannot be empty")
 
     @staticmethod
     def from_dict(d: dict[str, Any]) -> TransferDestination:
-        if not isinstance(d, dict):
-            raise ValueError("TransferDestination must be a dictionary")
-
-        return TransferDestination(number=d.get("number", ""), sip_uri=d.get("sip_uri"))
+        return parse_dataclass(TransferDestination, d)
 
 
 @dataclass
@@ -315,10 +242,7 @@ class TransferOption:
 
     @staticmethod
     def from_dict(d: dict[str, Any]) -> TransferOption:
-        if not isinstance(d, dict):
-            raise ValueError("TransferOption must be a dictionary")
-
-        return TransferOption(timeout=d.get("timeout", 30))
+        return parse_dataclass(TransferOption, d)
 
 
 __all__ = [

@@ -15,6 +15,14 @@ from .transition_evaluator import FlowContextVariableProvider, TransitionEvaluat
 logger = logging.getLogger(__name__)
 
 
+NODE_AGENT_CLASSES: dict[str, type[Agent]] = {
+    "conversation": ConversationNodeAgent,
+    "gather_input": GatherInputNode,
+    "function": FunctionNodeAgent,
+    "end": ConversationNodeAgent,
+}
+
+
 class FlowRunner:
     def __init__(
         self,
@@ -131,21 +139,19 @@ class FlowRunner:
 
     def _create_agent_for_node(self, node: Node) -> Agent:
         node_type = str(node.type)
-        if node_type == "conversation":
-            return ConversationNodeAgent(node=node, flow_runner=self, flow_context=self.context)
-        elif node_type == "gather_input":
-            return GatherInputNode(
-                extraction_llm=self.edge_llm,
-                node=node,
-                flow_runner=self,
-                flow_context=self.context,
-            )
-        elif node_type == "function":
-            return FunctionNodeAgent(node=node, flow_runner=self, flow_context=self.context)
-        elif node_type == "end":
-            return ConversationNodeAgent(node=node, flow_runner=self, flow_context=self.context)
-        else:
+        agent_cls = NODE_AGENT_CLASSES.get(node_type)
+        if agent_cls is None:
             raise ValueError(f"Unknown node type: {node.type}")
+
+        kwargs: dict[str, Any] = {
+            "node": node,
+            "flow_runner": self,
+            "flow_context": self.context,
+        }
+        if agent_cls is GatherInputNode:
+            kwargs["extraction_llm"] = self.edge_llm
+
+        return agent_cls(**kwargs)
 
     def register_function(self, tool_id: str, handler: Callable[..., Any]) -> None:
         self._function_handlers[tool_id] = handler

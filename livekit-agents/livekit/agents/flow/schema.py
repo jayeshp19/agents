@@ -19,6 +19,7 @@ from .fields import (
 )
 from .flow_spec import FlowSpec, Node, ToolSpec
 from .io import flow_to_dict, load_flow, save_flow
+from .utils import parse_dataclass
 
 __all__ = [
     "NodeType",
@@ -40,4 +41,5 @@ __all__ = [
     "load_flow",
     "save_flow",
     "flow_to_dict",
+    "parse_dataclass",
 ]

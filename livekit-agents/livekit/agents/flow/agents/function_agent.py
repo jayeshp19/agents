@@ -1,9 +1,7 @@
 import asyncio
 import inspect
 import logging
-import random
 from typing import Any, Optional, cast
-from urllib.parse import parse_qsl, urlencode, urlparse
 
 import aiohttp
 import jsonschema
@@ -11,6 +9,7 @@ from jsonpath_ng import parse as jsonpath_parse
 
 from ..base import BaseFlowAgent
 from ..transition_evaluator import FlowContextVariableProvider, TransitionEvaluator
+from .tool_http import parse_tool_response, prepare_request, send_with_retries
 
 logger = logging.getLogger(__name__)
 
@@ -85,94 +84,23 @@ class ToolExecutor:
     async def _execute_http(self, args: dict[str, Any]) -> dict[str, Any]:
         if self.session is None:
             raise RuntimeError("HTTP session not initialized for ToolExecutor")
-        url = self.tool["url"]
-        method = self.tool.get("http_method", "POST").upper()
-        headers = self.tool.get("headers", {})
-        timeout_ms = self.tool.get("timeout_ms", 30000)
-        parameter_type = self.tool.get("parameter_type", "json")
-        cb_max_failures = int(self.tool.get("cb_max_failures", 0))
-        cb_reset_ms = int(self.tool.get("cb_reset_ms", 30000))
-        if cb_max_failures > 0:
-            now = asyncio.get_event_loop().time()
-            last_reset = float(self.tool.get("_cb_last_reset", 0.0))
-            recent_failures = int(self.tool.get("_cb_recent_failures", 0))
-            if now - last_reset > (cb_reset_ms / 1000.0):
-                self.tool["_cb_recent_failures"] = 0
-                self.tool["_cb_last_reset"] = now
-                recent_failures = 0
-            if recent_failures >= cb_max_failures:
-                raise RuntimeError("circuit_open: too many recent failures")
+        url, method, req_kwargs, parameter_type = prepare_request(self.tool, args)
 
-        qp = self.tool.get("query_parameters") or self.tool.get("query_params")
-        if qp:
-            url = self._merge_query(url, qp)
+        data = await send_with_retries(
+            self.session,
+            method,
+            url,
+            req_kwargs,
+            parameter_type=parameter_type,
+            max_retries=self._max_retries,
+            retry_backoff_ms=self._retry_backoff_ms,
+            tool=self.tool,
+        )
 
-        timeout = aiohttp.ClientTimeout(total=timeout_ms / 1000)
-        req_kwargs: dict[str, Any] = {"headers": headers, "timeout": timeout}
-
-        if method == "GET":
-            req_kwargs["params"] = args
-        else:
-            match parameter_type:
-                case "json":
-                    req_kwargs["json"] = args
-                case "form":
-                    req_kwargs["data"] = args
-                case "multipart":
-                    form_data = aiohttp.FormData()
-                    for key, value in args.items():
-                        form_data.add_field(key, value)
-                    req_kwargs["data"] = form_data
-                case _:
-                    raise ValueError(f"Unsupported parameter_type '{parameter_type}'")
-
-        attempt = 0
-        while True:
-            try:
-                logger.debug(
-                    f"Making {method} request to {url} with {parameter_type} params (attempt {attempt + 1})"
-                )
-
-                async with self.session.request(method, url, **req_kwargs) as response:
-                    if response.status >= 500 or response.status == 429:
-                        text = await response.text()
-                        raise aiohttp.ClientResponseError(
-                            request_info=response.request_info,
-                            history=response.history,
-                            status=response.status,
-                            message=f"Retryable HTTP {response.status}: {text[:200]}",
-                            headers=response.headers,
-                        )
-
-                    response.raise_for_status()
-                    data: Any = await response.json()
-
-                if "response_variables" in self.tool:
-                    extracted = self._extract_json_paths(data, self.tool["response_variables"])
-                    return extracted if extracted else cast(dict[str, Any], data)
-
-                return cast(dict[str, Any], data)
-
-            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                attempt += 1
-                if cb_max_failures > 0:
-                    self.tool["_cb_recent_failures"] = (
-                        int(self.tool.get("_cb_recent_failures", 0)) + 1
-                    )
-                    self.tool["_cb_last_reset"] = asyncio.get_event_loop().time()
-                if attempt > self._max_retries:
-                    logger.error(f"HTTP error calling {url}, no retries left: {e}")
-                    raise
-                base = (self._retry_backoff_ms * (2 ** (attempt - 1))) / 1000.0
-                jitter = random.uniform(0.5, 1.5)
-                backoff = base * jitter
-                logger.warning(
-                    f"HTTP error calling {url}: {e} — retrying in {backoff:.2f}s ({attempt}/{self._max_retries})"
-                )
-                await asyncio.sleep(backoff)
-            except Exception as e:
-                logger.error(f"Unexpected error calling {url}: {e}")
-                raise
+        return cast(
+            dict[str, Any],
+            parse_tool_response(data, self.tool, self._extract_json_paths),
+        )
 
     async def _execute_local(self, args: dict[str, Any]) -> Any:
         handler = self.tool.get("handler")
@@ -183,15 +111,6 @@ class ToolExecutor:
         if inspect.iscoroutinefunction(handler):
             return await handler(args)
         return handler(args)
-
-    def _merge_query(self, url: str, extra: dict[str, str]) -> str:
-        if not extra:
-            return url
-        parsed = urlparse(url)
-        merged = dict(parse_qsl(parsed.query))
-        merged.update(extra)
-        query = urlencode(merged)
-        return parsed._replace(query=query).geturl()
 
     def _extract_json_paths(self, data: Any, mapping: dict[str, str]) -> dict[str, Any]:
         result: dict[str, Any] = {}

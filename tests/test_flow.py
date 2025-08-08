@@ -1,10 +1,20 @@
 import asyncio
 import json
+import logging
 from pathlib import Path
 
 import pytest
 
-from livekit.agents.flow import FlowRunner, FlowSpec, load_flow
+from livekit.agents.flow import (
+    Edge,
+    FlowRunner,
+    FlowSpec,
+    GatherInputVariable,
+    Node,
+    load_flow,
+    parse_dataclass,
+)
+from livekit.agents.flow.schema import TransitionCondition
 from livekit.agents.voice import AgentSession
 from tests.fake_llm import FakeLLM
 from tests.fake_stt import FakeSTT
@@ -31,6 +41,68 @@ def _make_min_session() -> AgentSession:
         max_endpointing_delay=0.5,
     )
     return session
+
+
+def _make_edge(dest: str | None = "next") -> Edge:
+    return Edge(
+        id="e1",
+        condition="cond",
+        transition_condition=TransitionCondition(type="prompt", prompt="p"),
+        destination_node_id=dest,
+    )
+
+
+def test_function_node_requires_edges() -> None:
+    with pytest.raises(ValueError):
+        Node(id="fn", name="Fn", type="function", tool_id="tid")
+
+
+def test_function_node_edge_requires_destination() -> None:
+    edge = _make_edge(dest=None)
+    with pytest.raises(ValueError):
+        Node(id="fn", name="Fn", type="function", tool_id="tid", edges=[edge])
+
+
+def test_gather_node_validation() -> None:
+    edge = _make_edge()
+    with pytest.raises(ValueError):
+        Node(id="g", name="Gather", type="gather_input", edges=[edge])
+
+    var = GatherInputVariable(name="email", type="email", description="d")
+    with pytest.raises(ValueError):
+        Node(
+            id="g",
+            name="Gather",
+            type="gather_input",
+            gather_input_variables=[var],
+            edges=[],
+        )
+
+    edge_no_dest = _make_edge(dest=None)
+    with pytest.raises(ValueError, match="Gather input node 'g' edge has no destination_node_id"):
+        Node(
+            id="g",
+            name="Gather",
+            type="gather_input",
+            gather_input_variables=[var],
+            edges=[edge_no_dest],
+        )
+
+
+def test_conversation_node_edge_requires_destination() -> None:
+    edge = _make_edge(dest=None)
+    with pytest.raises(ValueError):
+        Node(id="c", name="Conv", type="conversation", edges=[edge])
+
+
+def test_end_node_warns_on_edges(caplog: pytest.LogCaptureFixture) -> None:
+    edge = _make_edge()
+    with caplog.at_level(logging.WARNING, logger="livekit.agents.flow.validators"):
+        Node(id="end", name="End", type="end", edges=[edge])
+    assert any(
+        "End node 'end' has 1 edges. End nodes should not have outgoing edges." in record.message
+        for record in caplog.records
+    )
 
 
 @pytest.mark.asyncio
@@ -71,7 +143,7 @@ async def test_flow_spec_parse_and_validate(tmp_path: Path):
         "tools": [],
     }
 
-    flow = FlowSpec.from_dict(flow_dict)
+    flow = parse_dataclass(FlowSpec, flow_dict)
     assert flow.start_node_id == "start"
     assert not flow.validate_flow_structure()
 

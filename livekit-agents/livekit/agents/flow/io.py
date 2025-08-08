@@ -6,11 +6,12 @@ from typing import Any
 
 from .fields import Edge
 from .flow_spec import FlowSpec
+from .utils import parse_dataclass
 
 
 def load_flow(source: str | Path | dict[str, Any]) -> FlowSpec:
     if isinstance(source, dict):
-        return FlowSpec.from_dict(source)
+        return parse_dataclass(FlowSpec, source)
 
     path = Path(source)
     if not path.exists():
@@ -22,7 +23,7 @@ def load_flow(source: str | Path | dict[str, Any]) -> FlowSpec:
     except json.JSONDecodeError as e:
         raise json.JSONDecodeError(f"Invalid JSON in {path}: {e.msg}", e.doc, e.pos) from e
 
-    return FlowSpec.from_dict(data)
+    return parse_dataclass(FlowSpec, data)
 
 
 def save_flow(flow: FlowSpec, target: str | Path) -> None:
