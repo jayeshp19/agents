@@ -3,14 +3,14 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "livekit-plugins-mistralai"
+name = "livekit-plugins-smallestai"
 dynamic = ["version"]
-description = "LiveKit Agents Plugin for services from AWS"
+description = "Agent Framework plugin for speech synthesis with the Smallest AI."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.9.0"
 authors = [{ name = "LiveKit", email = "hello@livekit.io" }]
-keywords = ["webrtc", "realtime", "audio", "video", "livekit", "mistralai"]
+keywords = ["webrtc", "realtime", "audio", "video", "livekit", "smallestai", "multilingual", "tts"]
 classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
@@ -22,11 +22,7 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3 :: Only",
 ]
-dependencies = [
-    "livekit-agents>=1.2.5",
-    "livekit-plugins-openai>=1.2.5",
-    "mistralai>=1.9.3",
-]
+dependencies = ["livekit-agents[codecs]>=1.2.2", "numpy>=1.26"]
 
 [project.urls]
 Documentation = "https://docs.livekit.io"
@@ -34,10 +30,10 @@ Website = "https://livekit.io/"
 Source = "https://github.com/livekit/agents"
 
 [tool.hatch.version]
-path = "livekit/plugins/mistralai/version.py"
+path = "livekit/plugins/smallestai/version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["livekit"]
 
 [tool.hatch.build.targets.sdist]
-include = ["/livekit"]
+include = ["/livekit"] 
