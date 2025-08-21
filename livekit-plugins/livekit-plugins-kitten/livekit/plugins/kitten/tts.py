@@ -14,8 +14,8 @@ from livekit.agents.types import (
 )
 from livekit.agents.utils import is_given
 
-from .model import HG_MODEL
-from .runner import _KittenTTSRunner
+from .model import HG_MODEL, resolve_model_name
+from .runner import _KittenRunner
 
 SAMPLE_RATE: Final[int] = 24000
 NUM_CHANNELS: Final[int] = 1
@@ -47,7 +47,7 @@ class TTS(tts.TTS):
         )
 
         self._opts = _TTSOptions(
-            model_name=model_name,
+            model_name=resolve_model_name(model_name),
             voice=voice,
             speed=speed,
             emit_chunks=emit_chunks,
@@ -64,7 +64,7 @@ class TTS(tts.TTS):
         frame_size_ms: NotGivenOr[int] = NOT_GIVEN,
     ) -> None:
         if is_given(model_name):
-            self._opts.model_name = model_name
+            self._opts.model_name = resolve_model_name(model_name)
         if is_given(voice):
             self._opts.voice = voice
         if is_given(speed):
@@ -107,7 +107,7 @@ class ChunkedStream(tts.ChunkedStream):
                 "speed": self._opts.speed,
             }
             data = json.dumps(payload).encode()
-            result = await executor.do_inference(_KittenTTSRunner.INFERENCE_METHOD, data)
+            result = await executor.do_inference(_KittenRunner.INFERENCE_METHOD, data)
             assert result is not None
             return result
 

@@ -11,9 +11,7 @@ from livekit.agents.inference_runner import _InferenceRunner
 from livekit.agents.utils import hw
 
 from .model import (
-    DEFAULT_MODEL,
     HG_MODEL,
-    MODEL_REVISIONS,
     ONNX_FILENAME,
     VOICES_FILENAME,
 )
@@ -57,33 +55,30 @@ def _ensure_espeak_library() -> None:
     os.environ["PHONEMIZER_ESPEAK_LIBRARY"] = "/opt/homebrew/opt/espeak/lib/libespeak.dylib"
 
 
-class _KittenTTSRunner(_InferenceRunner):
-    INFERENCE_METHOD = "lk_kittentts_tts"
+class _KittenRunner(_InferenceRunner):
+    INFERENCE_METHOD = "lk_kitten_tts"
 
     def initialize(self) -> None:
         import onnxruntime as ort  # type: ignore[import-untyped]
         from huggingface_hub import errors, hf_hub_download
 
         repo_id = os.getenv("KITTENTTS_REPO_ID", HG_MODEL)
-        revision = os.getenv("KITTENTTS_REVISION", MODEL_REVISIONS[DEFAULT_MODEL])
         try:
             model_path = hf_hub_download(
                 repo_id=repo_id,
                 filename=ONNX_FILENAME,
-                revision=revision,
                 local_files_only=True,
             )
             voices_path = hf_hub_download(
                 repo_id=repo_id,
                 filename=VOICES_FILENAME,
-                revision=revision,
                 local_files_only=True,
             )
         except (errors.LocalEntryNotFoundError, OSError):
             raise RuntimeError(
-                "KittenTTS assets not found locally. Pre-download them first via"
+                "Kitten assets not found locally. Pre-download them first via"
                 " `python myagent.py download-files` (ensure `from livekit.plugins"
-                " import kittentts` is imported)."
+                " import kitten` is imported)."
             ) from None
 
         sess_options = ort.SessionOptions()
@@ -144,4 +139,4 @@ class _KittenTTSRunner(_InferenceRunner):
         return self._to_pcm16_bytes(waveform)
 
 
-_InferenceRunner.register_runner(_KittenTTSRunner)
+_InferenceRunner.register_runner(_KittenRunner)

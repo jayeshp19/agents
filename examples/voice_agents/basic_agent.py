@@ -22,7 +22,7 @@ from livekit.agents import (
 )
 from livekit.agents.llm import function_tool
 from livekit.agents.voice.transcription.filters import filter_markdown
-from livekit.plugins import deepgram, kittentts, openai, silero
+from livekit.plugins import deepgram, kitten, openai, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 # uncomment to enable Krisp background voice/noise cancellation
@@ -79,7 +79,7 @@ class MyAgent(Agent):
 
 def prewarm(proc: JobProcess):
     proc.userdata["vad"] = silero.VAD.load()
-    proc.userdata["tts"] = kittentts.TTS(speed=1.3)
+    proc.userdata["tts"] = kitten.TTS(speed=1.5)
 
 
 async def entrypoint(ctx: JobContext):
