@@ -1,16 +1,21 @@
 from __future__ import annotations
 
-import asyncio
-import threading
+import json
+import re
 from dataclasses import dataclass, replace
 from typing import Final
 
-import numpy as np
-
-from kittentts.onnx_model import KittenTTS_1_Onnx as _KittenOnnx
-from livekit.agents import tts, utils
-from livekit.agents.types import DEFAULT_API_CONNECT_OPTIONS, NOT_GIVEN, NotGivenOr
+from livekit.agents import APIConnectOptions, tts, utils
+from livekit.agents.job import get_job_context
+from livekit.agents.types import (
+    DEFAULT_API_CONNECT_OPTIONS,
+    NOT_GIVEN,
+    NotGivenOr,
+)
 from livekit.agents.utils import is_given
+
+from .model import HG_MODEL
+from .runner import _KittenTTSRunner
 
 SAMPLE_RATE: Final[int] = 24000
 NUM_CHANNELS: Final[int] = 1
@@ -29,7 +34,7 @@ class TTS(tts.TTS):
     def __init__(
         self,
         *,
-        model_name: str = "KittenML/kitten-tts-nano-0.1",
+        model_name: str = HG_MODEL,
         voice: str = "expr-voice-5-m",
         speed: float = 1.0,
         emit_chunks: bool = False,
@@ -49,60 +54,6 @@ class TTS(tts.TTS):
             frame_size_ms=frame_size_ms,
         )
 
-        self._model: _KittenOnnx | None = None
-        self._model_lock = threading.Lock()
-
-    def _ensure_model(self) -> _KittenOnnx:
-        if self._model is None:
-            with self._model_lock:
-                if self._model is None:
-                    import json
-                    import os
-
-                    from huggingface_hub import errors, hf_hub_download  # type: ignore
-
-                    repo_id = self._opts.model_name
-                    revision = os.getenv("KITTENTTS_REVISION")
-                    try:
-                        cfg_path = hf_hub_download(
-                            repo_id=repo_id,
-                            filename="config.json",
-                            revision=revision,
-                            local_files_only=True,
-                        )
-                        with open(cfg_path) as f:
-                            cfg = json.load(f)
-
-                        if cfg.get("type") != "ONNX1":
-                            raise RuntimeError(
-                                "Unsupported KittenTTS model type. Only ONNX1 is supported."
-                            )
-
-                        model_file = str(cfg.get("model_file"))
-                        voices_file = str(cfg.get("voices"))
-
-                        model_path = hf_hub_download(
-                            repo_id=repo_id,
-                            filename=model_file,
-                            revision=revision,
-                            local_files_only=True,
-                        )
-                        voices_path = hf_hub_download(
-                            repo_id=repo_id,
-                            filename=voices_file,
-                            revision=revision,
-                            local_files_only=True,
-                        )
-                    except (errors.LocalEntryNotFoundError, OSError):
-                        raise RuntimeError(
-                            "KittenTTS assets not found locally. Pre-download them first via "
-                            "`python myagent.py download-files` (ensure `from livekit.plugins import kittentts` is imported)."
-                        ) from None
-
-                    self._model = _KittenOnnx(model_path=model_path, voices_path=voices_path)
-
-        return self._model
-
     def update_options(
         self,
         *,
@@ -114,7 +65,6 @@ class TTS(tts.TTS):
     ) -> None:
         if is_given(model_name):
             self._opts.model_name = model_name
-            self._model = None
         if is_given(voice):
             self._opts.voice = voice
         if is_given(speed):
@@ -124,23 +74,20 @@ class TTS(tts.TTS):
         if is_given(frame_size_ms):
             self._opts.frame_size_ms = int(frame_size_ms)
 
-    def synthesize(self, text: str, *, conn_options=DEFAULT_API_CONNECT_OPTIONS) -> ChunkedStream:
+    def synthesize(
+        self,
+        text: str,
+        *,
+        conn_options: APIConnectOptions = DEFAULT_API_CONNECT_OPTIONS,
+    ) -> ChunkedStream:
         return ChunkedStream(tts=self, input_text=text, conn_options=conn_options)
 
 
 class ChunkedStream(tts.ChunkedStream):
-    def __init__(self, *, tts: TTS, input_text: str, conn_options) -> None:
+    def __init__(self, *, tts: TTS, input_text: str, conn_options: APIConnectOptions) -> None:
         super().__init__(tts=tts, input_text=input_text, conn_options=conn_options)
         self._tts = tts
         self._opts = replace(tts._opts)
-
-    @staticmethod
-    def _to_pcm16_bytes(audio: np.ndarray) -> bytes:
-        if audio.dtype != np.float32:
-            audio = audio.astype(np.float32)
-        audio = np.clip(audio, -1.0, 1.0)
-        pcm16 = (audio * 32767.0).astype(np.int16)
-        return pcm16.tobytes()
 
     async def _run(self, output_emitter: tts.AudioEmitter) -> None:
         output_emitter.initialize(
@@ -151,19 +98,24 @@ class ChunkedStream(tts.ChunkedStream):
             frame_size_ms=self._opts.frame_size_ms,
         )
 
-        # helper to run blocking synthesis in a thread
-        def _synthesize(text: str) -> bytes:
-            model = self._tts._ensure_model()
-            audio = model.generate(text, voice=self._opts.voice, speed=self._opts.speed)
-            return self._to_pcm16_bytes(audio)
+        executor = get_job_context().inference_executor
+
+        async def _synthesize(text: str) -> bytes:
+            payload = {
+                "text": text,
+                "voice": self._opts.voice,
+                "speed": self._opts.speed,
+            }
+            data = json.dumps(payload).encode()
+            result = await executor.do_inference(_KittenTTSRunner.INFERENCE_METHOD, data)
+            assert result is not None
+            return result
 
         if not self._opts.emit_chunks:
-            data: bytes = await asyncio.to_thread(_synthesize, self._input_text)
+            data = await _synthesize(self._input_text)
             output_emitter.push(data)
             output_emitter.flush()
         else:
-            import re
-
             parts = [
                 p.strip()
                 for p in re.split(r"([.!?]+)\s+", self._input_text)
@@ -188,6 +140,6 @@ class ChunkedStream(tts.ChunkedStream):
                 chunks = [self._input_text]
 
             for chunk in chunks:
-                data: bytes = await asyncio.to_thread(_synthesize, chunk)
+                data = await _synthesize(chunk)
                 output_emitter.push(data)
                 output_emitter.flush()

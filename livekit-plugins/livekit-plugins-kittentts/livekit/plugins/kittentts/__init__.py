@@ -5,11 +5,17 @@ from .version import __version__
 
 __all__ = ["TTS", "ChunkedStream", "KittenTTSPlugin", "__version__"]
 
-from livekit.agents import Plugin
-import json
 import os
 
-from typing import Any
+from livekit.agents import Plugin
+
+from .model import (
+    DEFAULT_MODEL,
+    HG_MODEL,
+    MODEL_REVISIONS,
+    ONNX_FILENAME,
+    VOICES_FILENAME,
+)
 
 
 class KittenTTSPlugin(Plugin):
@@ -20,30 +26,20 @@ class KittenTTSPlugin(Plugin):
         """Pre-download KittenTTS model assets from Hugging Face.
 
         Env:
-        - `KITTENTTS_REPO_ID` (default: `KittenML/kitten-tts-nano-0.1`)
+        - `KITTENTTS_REPO_ID` (default: ``HG_MODEL``)
         - `KITTENTTS_REVISION` (optional)
         """
-        from huggingface_hub import hf_hub_download  # type: ignore
+        from huggingface_hub import hf_hub_download
+        from transformers import AutoTokenizer  # type: ignore[import-untyped]
 
-        repo_id = os.getenv("KITTENTTS_REPO_ID", "KittenML/kitten-tts-nano-0.1")
-        revision = os.getenv("KITTENTTS_REVISION")
-        # fetch config.json to learn filenames
-        config_path = hf_hub_download(
-            repo_id=repo_id, filename="config.json", revision=revision
+        repo_id = os.getenv("KITTENTTS_REPO_ID", HG_MODEL)
+        revision = os.getenv(
+            "KITTENTTS_REVISION", MODEL_REVISIONS[DEFAULT_MODEL]
         )
-        with open(config_path, "r") as f:
-            cfg: dict[str, Any] = json.load(f)
 
-        if cfg.get("type") != "ONNX1":
-            # Only ONNX1 models supported by this plugin currently
-            return
-
-        model_file = cfg.get("model_file")
-        voices_file = cfg.get("voices")
-        if model_file:
-            hf_hub_download(repo_id=repo_id, filename=str(model_file), revision=revision)
-        if voices_file:
-            hf_hub_download(repo_id=repo_id, filename=str(voices_file), revision=revision)
+        AutoTokenizer.from_pretrained(repo_id, revision=revision)
+        hf_hub_download(repo_id=repo_id, filename=ONNX_FILENAME, revision=revision)
+        hf_hub_download(repo_id=repo_id, filename=VOICES_FILENAME, revision=revision)
 
 
 Plugin.register_plugin(KittenTTSPlugin())

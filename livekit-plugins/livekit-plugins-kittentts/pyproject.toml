@@ -23,8 +23,10 @@ classifiers = [
 ]
 dependencies = [
     "livekit-agents>=1.2.6",
-    # When packaged standalone, require KittenTTS. In this repo, it's available as a local package.
-    # "kittentts>=0.1.0",
+    "onnxruntime",
+    "numpy",
+    "huggingface_hub",
+    "phonemizer>=3.3.0",
 ]
 
 [project.urls]
