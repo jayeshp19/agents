@@ -14,7 +14,8 @@ from livekit import rtc
 from .. import llm, stt, utils, vad
 from ..log import logger
 from ..telemetry import trace_types, tracer
-from ..utils import aio
+from ..types import NOT_GIVEN, NotGivenOr
+from ..utils import aio, is_given
 from . import io
 from .agent import ModelSettings
 
@@ -104,6 +105,17 @@ class AudioRecognition:
         self._tasks: set[asyncio.Task[Any]] = set()
 
         self._user_turn_span: trace.Span | None = None
+
+    def update_options(
+        self,
+        *,
+        min_endpointing_delay: NotGivenOr[float] = NOT_GIVEN,
+        max_endpointing_delay: NotGivenOr[float] = NOT_GIVEN,
+    ) -> None:
+        if is_given(min_endpointing_delay):
+            self._min_endpointing_delay = min_endpointing_delay
+        if is_given(max_endpointing_delay):
+            self._max_endpointing_delay = max_endpointing_delay
 
     def start(self) -> None:
         self.update_stt(self._stt)
@@ -242,7 +254,6 @@ class AudioRecognition:
             return
 
         if ev.type == stt.SpeechEventType.FINAL_TRANSCRIPT:
-            self._hooks.on_final_transcript(ev)
             transcript = ev.alternatives[0].text
             language = ev.alternatives[0].language
             confidence = ev.alternatives[0].confidence
@@ -255,6 +266,7 @@ class AudioRecognition:
             if not transcript:
                 return
 
+            self._hooks.on_final_transcript(ev)
             logger.debug(
                 "received user transcript",
                 extra={"user_transcript": transcript, "language": self._last_language},
