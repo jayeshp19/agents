@@ -1,5 +1,5 @@
 {
-  "last_run": "2025-08-28T19:06:51.157Z",
+  "last_run": "2025-08-28T19:30:50.120Z",
   "mirrored": {
     "3280": {
       "head_sha": "f21fbce278b67ccded27113021879c74b9290b59",
@@ -20,6 +20,16 @@
       "last_updated": "2025-08-28T13:01:22.920Z",
       "upstream_title": "feat(Google): Add markup for TTS HD voices",
       "upstream_author": "itskyf"
+    },
+    "3282": {
+      "head_sha": "d602805667b23534167d0f2f6fbb7ff0340d9aef",
+      "branch": "upstream-pr-3282",
+      "base": "main",
+      "fork_pr_url": "https://github.com/jayeshp19/agents/pull/16",
+      "fork_pr_number": 16,
+      "last_updated": "2025-08-28T19:30:50.120Z",
+      "upstream_title": "fix(plugins:elevenlabs): fix exception in STT when serializing bool form field tag_audio_events",
+      "upstream_author": "mike-r-mclaughlin"
     }
   }
 }
