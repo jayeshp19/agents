@@ -21,10 +21,6 @@ on:
         description: 'Open a failure issue when mirroring fails (yes/no)'
         required: false
         default: 'no'
-      dry_run:
-        description: 'Do not push or create/update PRs (yes/no)'
-        required: false
-        default: 'no'
 
 permissions:
   contents: write
@@ -59,9 +55,10 @@ jobs:
           if [ ! -f .github/pr-mirror-state.json ]; then
             echo '{"last_run": null, "mirrored": {}}' > .github/pr-mirror-state.json
           fi
+          echo "Current state:"
           cat .github/pr-mirror-state.json
 
-      - name: Mirror upstream PRs (GraphQL)
+      - name: Mirror upstream PRs
         uses: actions/github-script@v7
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -72,45 +69,74 @@ jobs:
             const fs = require('fs');
             const cp = require('child_process');
 
-            // --- shell helpers ---
+            // --- helpers ---
             function sh(cmd, opts = {}) {
               core.info(`$ ${cmd}`);
               return cp.execSync(cmd, { stdio: 'inherit', ...opts });
             }
-            function shQuiet(cmd, opts = {}) { // for secret-bearing commands
+            function shQuiet(cmd, opts = {}) { // do not echo command (for secrets)
               return cp.execSync(cmd, { stdio: 'inherit', ...opts });
             }
 
-            // Mask secrets early
-            if (process.env.UPSTREAM_TOKEN) core.setSecret(process.env.UPSTREAM_TOKEN);
-            if (process.env.GITHUB_TOKEN)  core.setSecret(process.env.GITHUB_TOKEN);
+            // Retry helper for network operations
+            async function withRetry(fn, retries = 3) {
+              for (let i = 0; i < retries; i++) {
+                try {
+                  return await fn();
+                } catch (e) {
+                  if (i === retries - 1) throw e;
+                  const delay = 1000 * Math.pow(2, i);
+                  core.warning(`Attempt ${i + 1} failed, retrying in ${delay}ms: ${e.message}`);
+                  await new Promise(r => setTimeout(r, delay));
+                }
+              }
+            }
 
-            // Rate limit info (REST endpoint)
+            // Ensure label exists
+            async function ensureLabel(name, color) {
+              try { 
+                await github.rest.issues.getLabel({ owner: repoOwner, repo: repoName, name }); 
+              } catch {
+                try { 
+                  await github.rest.issues.createLabel({ owner: repoOwner, repo: repoName, name, color }); 
+                  core.info(`Created label: ${name}`);
+                } catch (e) {
+                  core.warning(`Could not create label ${name}: ${e.message}`);
+                }
+              }
+            }
+
+            // Mask secrets early (defense in depth)
+            if (process.env.UPSTREAM_TOKEN) core.setSecret(process.env.UPSTREAM_TOKEN);
+            if (process.env.GITHUB_TOKEN) core.setSecret(process.env.GITHUB_TOKEN);
+
+            // Rate limit info
             const { data: rateLimit } = await github.rest.rateLimit.get();
-            core.info(`API remaining: ${rateLimit.rate.remaining}/${rateLimit.rate.limit}`);
+            core.info(`API rate limit: ${rateLimit.rate.remaining}/${rateLimit.rate.limit}`);
+            if (rateLimit.rate.remaining < 100) {
+              core.warning(`Low API rate limit: ${rateLimit.rate.remaining} remaining`);
+            }
 
             // Load state
             let state = { last_run: null, mirrored: {} };
-            try { state = JSON.parse(fs.readFileSync('.github/pr-mirror-state.json', 'utf8')); } catch {}
+            try { 
+              state = JSON.parse(fs.readFileSync('.github/pr-mirror-state.json', 'utf8')); 
+            } catch {
+              core.info('Starting with fresh state');
+            }
 
-            // Inputs
-            const hoursBack       = parseInt(context.payload.inputs?.hours_back || '1', 10);
-            const closeOutdated   = (context.payload.inputs?.close_outdated || 'no') === 'yes';
-            const stealth         = (context.payload.inputs?.stealth || 'yes') === 'yes';
+            // Parse inputs
+            const hoursBack = parseInt(context.payload.inputs?.hours_back || '1', 10);
+            const closeOutdated = (context.payload.inputs?.close_outdated || 'no') === 'yes';
+            const stealth = (context.payload.inputs?.stealth || 'yes') === 'yes';
             const openIssueOnFail = (context.payload.inputs?.open_issue_on_fail || 'no') === 'yes';
-            const dryRun          = (context.payload.inputs?.dry_run || 'no') === 'yes';
-            const MAX_TO_PROCESS  = 60;
+            const MAX_TO_PROCESS = 60;
 
-            const now         = new Date();
-            const overlapMins = 10; // overlap to avoid missing updates if a run delays
-            // Adaptive window: start at last_run, but at most hours_back; and add overlap
-            const defaultFrom = new Date(now.getTime() - hoursBack * 3600 * 1000);
-            const lastRun     = state.last_run ? new Date(state.last_run) : null;
-            let checkFrom     = lastRun ? new Date(Math.min(lastRun.getTime(), defaultFrom.getTime())) : defaultFrom;
-            checkFrom = new Date(checkFrom.getTime() - overlapMins * 60 * 1000);
+            const now = new Date();
+            const checkFrom = state.last_run ? new Date(state.last_run) : new Date(now.getTime() - hoursBack * 3600 * 1000);
 
             const repoOwner = context.repo.owner;
-            const repoName  = context.repo.repo;
+            const repoName = context.repo.repo;
 
             // Auto-detect upstream (source preferred, else parent)
             const { data: thisRepo } = await github.rest.repos.get({ owner: repoOwner, repo: repoName });
@@ -118,15 +144,17 @@ jobs:
               core.setFailed('This repository is not a fork (no parent/source) — cannot auto-detect upstream.');
               return;
             }
-            const upstreamMeta  = thisRepo.source || thisRepo.parent;
+            const upstreamMeta = thisRepo.source || thisRepo.parent;
             const upstreamOwner = upstreamMeta.owner.login;
-            const upstreamRepo  = upstreamMeta.name;
-            const upstreamPriv  = !!upstreamMeta.private;
+            const upstreamRepo = upstreamMeta.name;
+            const upstreamPriv = !!upstreamMeta.private;
+            
+            core.info(`Configuration:`);
+            core.info(`  Time window: ${checkFrom.toISOString()} → ${now.toISOString()}`);
+            core.info(`  Upstream: ${upstreamOwner}/${upstreamRepo}${upstreamPriv ? ' (private)' : ''}`);
+            core.info(`  Options: stealth=${stealth}, close_outdated=${closeOutdated}, open_issue_on_fail=${openIssueOnFail}`);
 
-            core.info(`Window: ${checkFrom.toISOString()} → ${now.toISOString()} | close_outdated=${closeOutdated} | stealth=${stealth} | dry_run=${dryRun}`);
-            core.info(`Detected upstream: ${upstreamOwner}/${upstreamRepo}${upstreamPriv ? ' (private)' : ''}`);
-
-            // If private upstream, set global git header (needs UPSTREAM_TOKEN)
+            // If private upstream, set git header (needs UPSTREAM_TOKEN)
             if (upstreamPriv && !process.env.UPSTREAM_TOKEN) {
               core.warning('Upstream is private but UPSTREAM_TOKEN is not set; pull refs may fail.');
             }
@@ -135,157 +163,123 @@ jobs:
               shQuiet(`git config --global http.https://github.com/.extraheader "${header}"`);
             }
 
-            // --- GraphQL: list open PRs, newest updated first; stop once out of window ---
-            async function listUpdatedPRsGraphQL() {
-              const prs = [];
-              let cursor = null;
+            // List PRs updated in window
+            async function listUpdatedPRsPaged() {
+              const all = [];
+              let page = 1;
               while (true) {
-                const query = `
-                  query($owner:String!, $repo:String!, $cursor:String) {
-                    repository(owner:$owner, name:$repo) {
-                      pullRequests(first: 100, orderBy:{field: UPDATED_AT, direction: DESC}, states: OPEN, after: $cursor) {
-                        pageInfo { hasNextPage endCursor }
-                        nodes {
-                          number
-                          title
-                          updatedAt
-                          createdAt
-                          isDraft
-                          baseRefName
-                          author { login }
-                          headRef { name }
-                          headRefOid
-                          headRepository { cloneUrl }
-                          body
-                          url
-                        }
-                      }
-                    }
-                  }`;
-                const data = await github.graphql(query, { owner: upstreamOwner, repo: upstreamRepo, cursor });
-                const prConn = data.repository?.pullRequests;
-                if (!prConn || !prConn.nodes?.length) break;
-
-                for (const n of prConn.nodes) {
-                  const updated = new Date(n.updatedAt);
-                  if (updated < checkFrom) return prs; // early exit
-                  if (updated <= now) {
-                    prs.push({
-                      number: n.number,
-                      title: n.title,
-                      updated_at: n.updatedAt,
-                      created_at: n.createdAt,
-                      draft: n.isDraft,
-                      base: { ref: n.baseRefName },
-                      user: { login: n.author?.login || 'unknown' },
-                      head: {
-                        ref: n.headRef?.name || null,
-                        sha: n.headRefOid,
-                        repo: { clone_url: n.headRepository?.cloneUrl || null }
-                      },
-                      body: n.body,
-                      html_url: n.url
-                    });
-                  }
-                }
-                if (!prConn.pageInfo.hasNextPage) break;
-                cursor = prConn.pageInfo.endCursor;
+                const { data } = await withRetry(() => 
+                  github.rest.pulls.list({
+                    owner: upstreamOwner, 
+                    repo: upstreamRepo, 
+                    state: 'open',
+                    sort: 'updated', 
+                    direction: 'desc', 
+                    per_page: 100, 
+                    page
+                  })
+                );
+                if (!data.length) break;
+                all.push(...data);
+                const lastUpdated = new Date(data[data.length - 1].updated_at);
+                if (lastUpdated < checkFrom) break;
+                page += 1;
               }
-              return prs;
+              return all.filter(pr => {
+                const updatedAt = new Date(pr.updated_at);
+                return updatedAt >= checkFrom && updatedAt <= now;
+              });
             }
 
-            // --- Stealth sanitizers ---
+            // Sanitizers for stealth mode
             function sanitizeBody(src) {
               if (!src) return '*No description provided*';
               let text = src;
               // owner/repo#123 → owner / repo PR 123
               text = text.replace(/\b([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)#(\d+)\b/g, (_, o, r, n) => `${o} / ${r} PR ${n}`);
-              // #123 → PR 123 (avoid headers)
-              text = text.replace(/(^|[^A-Za-z0-9_/.-])#(\d+)\b/g, (m, pre, n) => `${pre}PR ${n}`);
-              // @user → ＠user (full-width at)
+              // #123 → PR 123 (but preserve markdown headers)
+              text = text.replace(/(^|[^#\n])#(\d+)\b/g, (m, pre, n) => `${pre}PR ${n}`);
+              // @user → ＠user (full-width at symbol)
               text = text.replace(/@([A-Za-z0-9-]+)/g, '＠$1');
-              // github URLs → hxxps
+              // GitHub URLs → hxxps
               text = text.replace(/https?:\/\/github\.com\/\S+/gi, (u) => u.replace(/^https:/i, 'hxxps:').replace(/^http:/i, 'hxxp:'));
-              // collapse spaces
+              // Collapse excessive spaces
               text = text.replace(/ {2,}/g, ' ');
               return text;
             }
+
             function sanitizeInline(s) {
               if (!s) return '';
               let t = s;
               t = t.replace(/\b([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)#(\d+)\b/g, (_, o, r, n) => `${o} / ${r} PR ${n}`);
-              t = t.replace(/(^|[^A-Za-z0-9_/.-])#(\d+)\b/g, (m, pre, n) => `${pre}PR ${n}`);
+              t = t.replace(/(^|[^#])#(\d+)\b/g, (m, pre, n) => `${pre}PR ${n}`);
               t = t.replace(/@([A-Za-z0-9-]+)/g, '＠$1');
               return t;
             }
-            function buildBody(pr, headSha, nowISO, prevSha, upstreamOwner, upstreamRepo, stealth) {
-              const safeUser = (u) => `＠${u}`; // FULL-WIDTH @
-              const safeRef  = `${upstreamOwner} / ${upstreamRepo} PR ${pr.number}`;
-              const safeSHA  = headSha.substring(0, 7);
-              const created  = new Date(pr.created_at).toISOString().split('T')[0];
-              const updated  = new Date(pr.updated_at).toISOString().split('T')[0];
+
+            function buildBody(pr, headSha, nowISO, prevSha) {
+              const safeUser = stealth ? `＠${pr.user.login}` : `@${pr.user.login}`;
+              const safeRef = stealth ? `${upstreamOwner} / ${upstreamRepo} PR ${pr.number}` : `${upstreamOwner}/${upstreamRepo}#${pr.number}`;
+              const safeSHA = headSha.substring(0, 7);
+              const created = new Date(pr.created_at).toISOString().split('T')[0];
+              const updated = new Date(pr.updated_at).toISOString().split('T')[0];
 
               const headerTbl =
                 `| Field | Value |\n` +
                 `| --- | --- |\n` +
                 `| Upstream | ${safeRef} |\n` +
-                `| Author | ${safeUser(pr.user.login)} |\n` +
+                `| Author | ${safeUser} |\n` +
                 `| Created | ${created} |\n` +
                 `| Last Updated | ${updated} |\n` +
                 `| Mirrored At | ${nowISO} |\n` +
                 `| Commit | \`${safeSHA}\` |\n` +
-                `| Status | ${pr.draft ? 'Draft' : 'Ready for review'} |\n`;
+                `| Status | ${pr.draft ? '📝 Draft' : '✅ Ready for review'} |\n`;
 
               const desc = stealth ? sanitizeBody(pr.body) : (pr.body || '*No description provided*');
-              const maybeUpdated = (prevSha && prevSha !== headSha) ? `\n---\nUpdated with new commits at ${nowISO}\n` : '';
+              const maybeUpdated = (prevSha && prevSha !== headSha) ? `\n---\n⚠️ Updated with new commits at ${nowISO}\n` : '';
               const meta = `<!-- upstream=${upstreamOwner}/${upstreamRepo} PR=${pr.number} sha=${safeSHA} -->`;
-              return `## Mirrored from upstream\n\n${headerTbl}\n\n### Original Description${stealth ? ' (sanitized)' : ''}\n\n${desc}\n${maybeUpdated}\n${meta}`;
+              
+              return `## 🔄 Mirrored from upstream\n\n${headerTbl}\n\n### Original Description${stealth ? ' (sanitized)' : ''}\n\n${desc}\n${maybeUpdated}\n${meta}`;
             }
 
-            // Results
-            const results = { created: [], updated: [], planned: [], skipped: [], failed: [], closed: [] };
+            // Results tracking
+            const results = { created: [], updated: [], skipped: [], failed: [], closed: [] };
 
             try {
-              let prs = await listUpdatedPRsGraphQL();
+              // Create labels upfront
+              await ensureLabel('upstream-mirror', '0e8a16');
+              
+              // Fetch PRs
+              let prs = await listUpdatedPRsPaged();
               if (prs.length > MAX_TO_PROCESS) {
                 core.warning(`Limiting to first ${MAX_TO_PROCESS} PRs this run (found ${prs.length}).`);
                 prs = prs.slice(0, MAX_TO_PROCESS);
               }
               core.info(`Processing ${prs.length} PR(s) from upstream.`);
 
-              // Ensure labels exist (namespaced)
-              async function ensureLabel(name, color) {
-                try { await github.rest.issues.getLabel({ owner: repoOwner, repo: repoName, name }); }
-                catch {
-                  try { await github.rest.issues.createLabel({ owner: repoOwner, repo: repoName, name, color }); }
-                  catch (e) { core.warning(`Could not create label ${name}: ${e.message}`); }
-                }
-              }
-              await ensureLabel('mirror/upstream', '1d76db');
-
+              // Process each PR
               for (const pr of prs) {
                 try {
-                  const number  = pr.number;
+                  const number = pr.number;
                   const headSha = pr.head.sha;
-                  const prev    = state.mirrored[number];
+                  const prev = state.mirrored[number];
 
+                  // Skip if unchanged
                   if (prev && prev.head_sha === headSha) {
                     results.skipped.push(`PR #${number} - no new commits`);
                     continue;
                   }
 
-                  const branchName      = `upstream-pr-${number}`;
+                  const branchName = `upstream-pr-${number}`;
                   const upstreamBaseRef = pr.base.ref;
 
-                  // Fetch via pull/<n>/head
+                  core.info(`Processing PR #${number}: ${pr.title}`);
+
+                  // Try fetch via pull/<n>/head
                   let fetched = false;
                   try {
-                    core.startGroup(`Fetch #${number}`);
-                    if (!dryRun) {
-                      sh(`git fetch --no-tags --depth=1 https://github.com/${upstreamOwner}/${upstreamRepo}.git pull/${number}/head:${branchName}`);
-                    } else {
-                      core.info(`[dry-run] would fetch pull/${number}/head -> ${branchName}`);
-                    }
+                    core.startGroup(`Fetch PR #${number}`);
+                    sh(`git fetch --no-tags --depth=1 https://github.com/${upstreamOwner}/${upstreamRepo}.git pull/${number}/head:${branchName}`);
                     fetched = true;
                   } catch (e) {
                     core.warning(`Direct pull ref failed for #${number}: ${e.message}`);
@@ -296,39 +290,40 @@ jobs:
                   // Fallback: clone head repo/branch
                   if (!fetched) {
                     const headRepo = pr.head.repo?.clone_url;
-                    const headRef  = pr.head.ref;
-                    if (!headRepo || !headRef) {
-                      results.failed.push(`PR #${number} - missing head repo/ref`);
+                    const headRef = pr.head.ref;
+                    
+                    if (!headRepo) {
+                      results.failed.push(`PR #${number} - source fork deleted or private`);
+                      core.warning(`PR #${number}: The source fork has been deleted or made private`);
                       continue;
                     }
-                    core.startGroup(`Fallback clone #${number}`);
+                    if (!headRef) {
+                      results.failed.push(`PR #${number} - missing head ref`);
+                      continue;
+                    }
+                    
+                    core.startGroup(`Fallback clone PR #${number}`);
                     try {
-                      if (!dryRun) {
-                        sh(`rm -rf mirrortmp || true`);
-                        sh(`git clone --no-tags --filter=blob:none --depth=1 --branch ${headRef} ${headRepo} mirrortmp`);
-                        const ghToken = process.env.GITHUB_TOKEN;
-                        if (ghToken) {
-                          const header = "AUTHORIZATION: basic " + Buffer.from(`x-access-token:${ghToken}`).toString('base64');
-                          shQuiet(`git -C mirrortmp config http.https://github.com/.extraheader "${header}"`);
-                        }
-                        sh(`git -C mirrortmp push https://github.com/${repoOwner}/${repoName}.git HEAD:${branchName} --force --no-verify`);
-                        try { shQuiet(`git -C mirrortmp config --unset-all http.https://github.com/.extraheader`); } catch {}
-                        sh(`rm -rf mirrortmp || true`);
-                      } else {
-                        core.info(`[dry-run] would clone ${headRepo}#${headRef} and push -> ${branchName}`);
+                      sh(`rm -rf mirrortmp || true`);
+                      sh(`git clone --no-tags --filter=blob:none --depth=1 --branch ${headRef} ${headRepo} mirrortmp`);
+                      const ghToken = process.env.GITHUB_TOKEN;
+                      if (ghToken) {
+                        const header = "AUTHORIZATION: basic " + Buffer.from(`x-access-token:${ghToken}`).toString('base64');
+                        shQuiet(`git -C mirrortmp config http.https://github.com/.extraheader "${header}"`);
                       }
+                      sh(`git -C mirrortmp push https://github.com/${repoOwner}/${repoName}.git HEAD:${branchName} --force --no-verify`);
+                      try { 
+                        shQuiet(`git -C mirrortmp config --unset-all http.https://github.com/.extraheader`); 
+                      } catch {}
                     } finally {
+                      sh(`rm -rf mirrortmp || true`);
                       core.endGroup();
                     }
                   } else {
-                    if (!dryRun) {
-                      sh(`git push --no-verify origin ${branchName} --force`);
-                    } else {
-                      core.info(`[dry-run] would push branch ${branchName}`);
-                    }
+                    sh(`git push --no-verify origin ${branchName} --force`);
                   }
 
-                  // Base branch fallback to fork default
+                  // Determine base branch in fork
                   let baseRef = upstreamBaseRef;
                   try {
                     await github.rest.repos.getBranch({ owner: repoOwner, repo: repoName, branch: baseRef });
@@ -338,105 +333,142 @@ jobs:
                     core.warning(`Base '${upstreamBaseRef}' not found in fork. Using '${baseRef}'`);
                   }
 
-                  // Existing PR?
+                  // Check for existing PR
                   const existing = await github.rest.pulls.list({
-                    owner: repoOwner, repo: repoName, state: 'open', head: `${repoOwner}:${branchName}`,
+                    owner: repoOwner, 
+                    repo: repoName, 
+                    state: 'open', 
+                    head: `${repoOwner}:${branchName}`,
                   });
 
                   const nowISO = now.toISOString();
-                  const body   = buildBody(pr, headSha, nowISO, prev?.head_sha, upstreamOwner, upstreamRepo, stealth);
-
+                  const body = buildBody(pr, headSha, nowISO, prev?.head_sha);
                   let forkPRUrl, forkPRNumber;
-                  if (existing.data.length > 0) {
-                    forkPRUrl    = existing.data[0].html_url;
-                    forkPRNumber = existing.data[0].number;
 
+                  if (existing.data.length > 0) {
+                    // Update existing PR
+                    forkPRUrl = existing.data[0].html_url;
+                    forkPRNumber = existing.data[0].number;
+                    
                     if (!prev || prev.head_sha !== headSha) {
-                      if (!dryRun) {
-                        await github.rest.pulls.update({ owner: repoOwner, repo: repoName, pull_number: forkPRNumber, body });
-                        results.updated.push(`PR #${number} → ${forkPRUrl} (new commits)`);
-                      } else {
-                        results.planned.push(`PR #${number} would update body of existing fork PR #${forkPRNumber}`);
-                      }
+                      await github.rest.pulls.update({ 
+                        owner: repoOwner, 
+                        repo: repoName, 
+                        pull_number: forkPRNumber, 
+                        body 
+                      });
+                      results.updated.push(`PR #${number} → ${forkPRUrl} (new commits)`);
                     } else {
                       results.skipped.push(`PR #${number} - already mirrored`);
                     }
                   } else {
-                    if (!dryRun) {
-                      const created = await github.rest.pulls.create({
-                        owner: repoOwner, repo: repoName,
-                        title: `[Upstream PR ${number}] ${stealth ? sanitizeInline(pr.title) : pr.title}`,
-                        body, head: branchName, base: baseRef, draft: true
-                      });
-                      forkPRUrl    = created.data.html_url;
-                      forkPRNumber = created.data.number;
-                      results.created.push(`PR #${number} → ${forkPRUrl}`);
+                    // Create new PR
+                    const title = stealth ? 
+                      `[Upstream PR ${number}] ${sanitizeInline(pr.title)}` : 
+                      `[Upstream PR #${number}] ${pr.title}`;
+                    
+                    const created = await withRetry(() => 
+                      github.rest.pulls.create({
+                        owner: repoOwner, 
+                        repo: repoName,
+                        title, 
+                        body, 
+                        head: branchName, 
+                        base: baseRef, 
+                        draft: true
+                      })
+                    );
+                    
+                    forkPRUrl = created.data.html_url;
+                    forkPRNumber = created.data.number;
+                    results.created.push(`PR #${number} → ${forkPRUrl}`);
 
-                      // Labels (namespaced)
-                      async function ensureLabel(name, color) {
-                        try { await github.rest.issues.getLabel({ owner: repoOwner, repo: repoName, name }); }
-                        catch { try { await github.rest.issues.createLabel({ owner: repoOwner, repo: repoName, name, color }); } catch {} }
-                      }
+                    // Add labels
+                    try {
+                      await github.rest.issues.addLabels({
+                        owner: repoOwner, 
+                        repo: repoName, 
+                        issue_number: forkPRNumber,
+                        labels: ['upstream-mirror', `upstream-pr-${number}`]
+                      });
+                    } catch {
+                      await ensureLabel(`upstream-pr-${number}`, 'fbca04');
                       try {
                         await github.rest.issues.addLabels({
-                          owner: repoOwner, repo: repoName, issue_number: forkPRNumber,
-                          labels: ['mirror/upstream', `mirror/pr-${number}`]
+                          owner: repoOwner, 
+                          repo: repoName, 
+                          issue_number: forkPRNumber,
+                          labels: ['upstream-mirror', `upstream-pr-${number}`]
                         });
-                      } catch {
-                        await ensureLabel(`mirror/pr-${number}`, 'fbca04');
-                        try {
-                          await github.rest.issues.addLabels({
-                            owner: repoOwner, repo: repoName, issue_number: forkPRNumber,
-                            labels: ['mirror/upstream', `mirror/pr-${number}`]
-                          });
-                        } catch {}
+                      } catch (e) {
+                        core.warning(`Could not add labels to PR #${forkPRNumber}: ${e.message}`);
                       }
-                    } else {
-                      results.planned.push(`PR #${number} would create fork PR (base=${baseRef}, head=${branchName})`);
                     }
                   }
 
                   // Update state
                   state.mirrored[number] = {
-                    head_sha: headSha, branch: branchName, base: baseRef,
-                    fork_pr_url: forkPRUrl || null, fork_pr_number: forkPRNumber || null,
+                    head_sha: headSha, 
+                    branch: branchName, 
+                    base: baseRef,
+                    fork_pr_url: forkPRUrl, 
+                    fork_pr_number: forkPRNumber,
                     last_updated: now.toISOString(),
-                    upstream_title: pr.title, upstream_author: pr.user.login
+                    upstream_title: pr.title, 
+                    upstream_author: pr.user.login
                   };
 
                 } catch (err) {
+                  core.error(`Failed to mirror PR #${pr.number}: ${err.message}`);
                   results.failed.push(`PR #${pr.number}: ${err.message}`);
                 }
               }
 
-              // Close mirrored PRs whose upstream is closed (stealth comment)
+              // Close mirrored PRs whose upstream is closed
               if (closeOutdated) {
+                core.info('Checking for closed upstream PRs...');
                 const mirroredNumbers = Object.keys(state.mirrored);
+                
                 for (const num of mirroredNumbers) {
                   try {
-                    const upstream = await github.rest.pulls.get({
-                      owner: upstreamOwner, repo: upstreamRepo, pull_number: parseInt(num, 10)
-                    });
+                    const upstream = await withRetry(() => 
+                      github.rest.pulls.get({
+                        owner: upstreamOwner, 
+                        repo: upstreamRepo, 
+                        pull_number: parseInt(num, 10)
+                      })
+                    );
+                    
                     if (upstream.data.state === 'closed') {
                       const info = state.mirrored[num];
                       if (info?.fork_pr_number) {
                         const forkPR = await github.rest.pulls.get({
-                          owner: repoOwner, repo: repoName, pull_number: info.fork_pr_number
+                          owner: repoOwner, 
+                          repo: repoName, 
+                          pull_number: info.fork_pr_number
                         }).catch(() => null);
+                        
                         if (forkPR && forkPR.data.state === 'open') {
                           const statusTxt = upstream.data.merged ? 'merged' : 'closed';
-                          if (!dryRun) {
-                            await github.rest.issues.createComment({
-                              owner: repoOwner, repo: repoName, issue_number: info.fork_pr_number,
-                              body: `Auto‑closing mirror. Upstream PR ${num} is ${statusTxt}.`
-                            });
-                            await github.rest.pulls.update({
-                              owner: repoOwner, repo: repoName, pull_number: info.fork_pr_number, state: 'closed'
-                            });
-                            results.closed.push(`Closed fork PR #${info.fork_pr_number} (upstream ${num} ${statusTxt})`);
-                          } else {
-                            results.planned.push(`Would close fork PR #${info.fork_pr_number} because upstream ${num} is ${statusTxt}`);
-                          }
+                          const commentBody = stealth ?
+                            `🔒 Auto-closing mirror. Upstream PR ${num} is ${statusTxt}.` :
+                            `🔒 Auto-closing: Upstream ${upstreamOwner}/${upstreamRepo}#${num} is ${statusTxt}.`;
+                          
+                          await github.rest.issues.createComment({
+                            owner: repoOwner, 
+                            repo: repoName, 
+                            issue_number: info.fork_pr_number,
+                            body: commentBody
+                          });
+                          
+                          await github.rest.pulls.update({
+                            owner: repoOwner, 
+                            repo: repoName, 
+                            pull_number: info.fork_pr_number, 
+                            state: 'closed'
+                          });
+                          
+                          results.closed.push(`Closed fork PR #${info.fork_pr_number} (upstream ${num} ${statusTxt})`);
                         }
                       }
                       delete state.mirrored[num];
@@ -448,51 +480,67 @@ jobs:
               }
 
             } catch (outerErr) {
-              results.failed.push(`Exception: ${outerErr.message}`);
+              results.failed.push(`Fatal error: ${outerErr.message}`);
               core.setFailed(outerErr.message);
             } finally {
               // Save state
-              state.last_run = new Date().toISOString();
+              state.last_run = now.toISOString();
               fs.writeFileSync('.github/pr-mirror-state.json', JSON.stringify(state, null, 2));
-              try {
-                if (!dryRun) {
-                  sh('git add .github/pr-mirror-state.json');
-                  sh(`git commit -m "Update PR mirror state - ${state.last_run}"`);
-                  sh('git push');
-                } else {
-                  core.info('[dry-run] would commit and push updated state file');
-                }
-              } catch {}
+              
+              try { 
+                sh('git add .github/pr-mirror-state.json'); 
+                sh(`git commit -m "Update PR mirror state - ${state.last_run}"`); 
+                sh('git push'); 
+              } catch {
+                core.info('No state changes to commit');
+              }
 
-              // Unset global header (cleanup)
-              try { shQuiet('git config --global --unset-all http.https://github.com/.extraheader'); } catch {}
+              // Clean up git config
+              try { 
+                shQuiet('git config --global --unset-all http.https://github.com/.extraheader'); 
+              } catch {}
 
               // Build summary
               const lines = [];
-              if (results.created.length) lines.push(`### ✅ Created (${results.created.length})`, ...results.created.map(x => `- ${x}`), '');
-              if (results.updated.length) lines.push(`### 🔄 Updated (${results.updated.length})`, ...results.updated.map(x => `- ${x}`), '');
-              if (results.closed.length)  lines.push(`### 🔒 Closed (${results.closed.length})`,  ...results.closed.map(x => `- ${x}`), '');
-              if (results.planned.length) lines.push(`### 🧪 Planned (dry-run) (${results.planned.length})`, ...results.planned.map(x => `- ${x}`), '');
-              if (results.failed.length)  lines.push(`### ❌ Failed (${results.failed.length})`,  ...results.failed.map(x => `- ${x}`), '');
-              if (results.skipped.length) lines.push(`### ⏭️ Skipped (${results.skipped.length})`, ...results.skipped.map(x => `- ${x}`), '');
-              if (!lines.length) lines.push('No PRs needed processing in this time window.');
+              if (results.created.length) {
+                lines.push(`### ✅ Created (${results.created.length})`, ...results.created.map(x => `- ${x}`), '');
+              }
+              if (results.updated.length) {
+                lines.push(`### 🔄 Updated (${results.updated.length})`, ...results.updated.map(x => `- ${x}`), '');
+              }
+              if (results.closed.length) {
+                lines.push(`### 🔒 Closed (${results.closed.length})`,  ...results.closed.map(x => `- ${x}`), '');
+              }
+              if (results.failed.length) {
+                lines.push(`### ❌ Failed (${results.failed.length})`,  ...results.failed.map(x => `- ${x}`), '');
+              }
+              if (results.skipped.length) {
+                lines.push(`### ⏭️ Skipped (${results.skipped.length})`, ...results.skipped.map(x => `- ${x}`), '');
+              }
+              
+              if (!lines.length) {
+                lines.push('No PRs needed processing in this time window.');
+              }
 
               await core.summary
-                .addHeading('Upstream PR Mirror Report')
-                .addRaw(`Upstream: ${upstreamOwner} / ${upstreamRepo}\n`)
-                .addRaw(`Time Range: ${checkFrom.toISOString()} → ${new Date().toISOString()}\n`)
-                .addRaw(`Rate Limit: ${rateLimit.rate.remaining}/${rateLimit.rate.limit}\n`)
-                .addRaw(`Dry Run: ${dryRun}\n\n`)
+                .addHeading('🔄 Upstream PR Mirror Report')
+                .addRaw(`**Upstream:** ${upstreamOwner}/${upstreamRepo}\n`)
+                .addRaw(`**Time Range:** ${checkFrom.toISOString()} → ${now.toISOString()}\n`)
+                .addRaw(`**API Rate Limit:** ${rateLimit.rate.remaining}/${rateLimit.rate.limit}\n\n`)
                 .addRaw(lines.join('\n'))
                 .write();
 
               // Optional failure issue
-              if (openIssueOnFail && results.failed.length && !dryRun) {
+              if (openIssueOnFail && results.failed.length) {
                 await github.rest.issues.create({
-                  owner: repoOwner, repo: repoName,
-                  title: `PR Mirror Failures - ${new Date().toISOString().split('T')[0]}`,
-                  body: `## Failures\n\n${results.failed.map(f => `- ${f}`).join('\n')}\n\n[Run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
-                  labels: ['mirror-failure']
-                }).catch(() => {});
+                  owner: repoOwner, 
+                  repo: repoName,
+                  title: `PR Mirror Failures - ${now.toISOString().split('T')[0]}`,
+                  body: `## ⚠️ Mirror Failures\n\n${results.failed.map(f => `- ${f}`).join('\n')}\n\n[View workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
+                  labels: ['mirror-failure', 'upstream-mirror']
+                }).catch(e => core.warning(`Could not create issue: ${e.message}`));
               }
+
+              const totalProcessed = results.created.length + results.updated.length + results.closed.length;
+              core.info(`✅ Mirroring complete. Processed ${totalProcessed} PRs, skipped ${results.skipped.length}, failed ${results.failed.length}`);
             }
