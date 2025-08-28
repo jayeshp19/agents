@@ -1,6 +1,16 @@
 {
-  "last_run": "2025-08-28T13:01:22.920Z",
+  "last_run": "2025-08-28T13:42:28.143Z",
   "mirrored": {
+    "3280": {
+      "head_sha": "f21fbce278b67ccded27113021879c74b9290b59",
+      "branch": "upstream-pr-3280",
+      "base": "main",
+      "fork_pr_url": "https://github.com/jayeshp19/agents/pull/15",
+      "fork_pr_number": 15,
+      "last_updated": "2025-08-28T13:42:28.143Z",
+      "upstream_title": "allow SpeechHandle to be interrupted when long-running function tools are pending",
+      "upstream_author": "longcw"
+    },
     "3281": {
       "head_sha": "4ae047baa6ea5f8570c3f0fd966dd239a4ab4d77",
       "branch": "upstream-pr-3281",
