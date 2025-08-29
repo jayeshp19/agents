@@ -1,5 +1,5 @@
 {
-  "last_run": "2025-08-29T02:19:05.477Z",
+  "last_run": "2025-08-29T03:12:51.765Z",
   "mirrored": {
     "3280": {
       "head_sha": "f21fbce278b67ccded27113021879c74b9290b59",
@@ -30,6 +30,16 @@
       "last_updated": "2025-08-28T19:30:50.120Z",
       "upstream_title": "fix(plugins:elevenlabs): fix exception in STT when serializing bool form field tag_audio_events",
       "upstream_author": "mike-r-mclaughlin"
+    },
+    "3284": {
+      "head_sha": "842e0883ea46452134db1f2672f56dbb5e5b6aea",
+      "branch": "upstream-pr-3284",
+      "base": "main",
+      "fork_pr_url": "https://github.com/jayeshp19/agents/pull/17",
+      "fork_pr_number": 17,
+      "last_updated": "2025-08-29T03:12:51.765Z",
+      "upstream_title": "fix (11labs): fix empty text input and timeout for the first audio chunk",
+      "upstream_author": "longcw"
     }
   }
 }
