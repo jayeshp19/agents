@@ -657,6 +657,7 @@ class AgentActivity(RecognitionHooks):
             await self._audio_recognition.aclose()
 
         await self._interrupt_paused_speech(old_task=self._interrupt_paused_speech_task)
+        await asyncio.gather(*self._interrupt_background_speeches(force=False))
         self._interrupt_paused_speech_task = None
 
     async def aclose(self) -> None:
