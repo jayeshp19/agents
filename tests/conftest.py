@@ -18,6 +18,7 @@ from .agentdb_fixture import (  # noqa: F401  (re-exported so pytest discovers t
     agentdb_storage,
     agentdb_worker,
     agentdb_workers,
+    local_agentstore,
 )
 from .toxic_proxy import Toxiproxy
 from .virtual_time import (  # noqa: F401  (re-exported so pytest discovers the fixtures)
