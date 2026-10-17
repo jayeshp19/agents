@@ -6,8 +6,10 @@ stale commit) is tested in the crate: ``rust/crates/lk-agents-storage/tests``.""
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
@@ -17,6 +19,7 @@ import pytest
 
 from livekit.agents import Agent, AgentTask, InputRequired, RunContext, _core
 from livekit.agents._generated.storage import (
+    AcquireRequest,
     LaneRow,
     Received,
     ReceiveRequest,
@@ -35,6 +38,7 @@ from livekit.agents.storage.resolve import AgentRegistry, Thread, resolve_thread
 
 from .agentdb_fixture import let_the_lease_lapse, new_session
 from .fake_llm import FakeLLM, FakeLLMResponse
+from .local_agentstore import LocalAgentStore
 
 pytestmark = [pytest.mark.unit]
 
@@ -472,6 +476,122 @@ async def test_a_resend_after_the_holder_died_fails_worker_lost(
     assert again.output == "reply to: hello again"
     items = await history_items(b, sid, LANE)
     assert [i.text_content for i in items] == ["hello again", "reply to: hello again"]
+
+
+async def test_a_cancelled_turn_stops_renewing_its_lease(
+    agentdb_worker: Callable[[str], AgentDBStorage],
+    local_agentstore: LocalAgentStore | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn cancelled in process (``_core.Turn.run`` as ``A2AService.turn()`` runs it, which a
+    delegating call cancels on barge-in) drops its run without a commit: the run stops renewing
+    and its lease lapses within the TTL, so the next message on the lane takes it, fails the
+    orphan ``worker-lost`` and answers, rather than waiting out its wait and failing
+    ``lease-timeout`` behind a lease the dropped run kept renewing. The handler's context outlives
+    the run, as it does in a task the handler started: it holds the turn's boundary, and with it
+    the lease."""
+    ttl, interval = 2, 0.25
+    monkeypatch.setenv("LIVEKIT_AGENTDB_LEASE_TTL", str(ttl))
+    monkeypatch.setenv("LIVEKIT_AGENTDB_RENEW_INTERVAL", str(interval))
+    storage = agentdb_worker("wa")
+    sid = await new_session(storage, LANE)
+    # the lane is read on a connection of its own: a pooled open could take the cancelled turn's
+    # parked connection mid-renewal and close it, which ends the renewals by accident
+    reader = await storage.open(sid)
+    entered = asyncio.Event()
+    never = asyncio.Event()
+    kept: list[A2ASessionContext[Any]] = []
+
+    async def stuck(ctx: A2ASessionContext[Any]) -> str:
+        kept.append(ctx)
+        entered.set()
+        await never.wait()
+        return "late"
+
+    turn = asyncio.create_task(
+        run_turn(storage, sid, LANE, a2a("hello", "m1"), "queue", stuck, task_id="AST_h5")
+    )
+    await entered.wait()
+    held = await reader.lane(LANE)
+    assert held is not None and held.lease_token
+    turn.cancel()
+    await asyncio.gather(turn, return_exceptions=True)
+
+    await asyncio.sleep(2.5 * interval)  # a renew in flight at the cancel lands
+    settled = await reader.lane(LANE)
+    settled_at = time.monotonic()
+    await asyncio.sleep(ttl + 1)
+    lapsed = await reader.lane(LANE)
+    reader.close()
+    assert settled is not None and lapsed is not None
+
+    after = await run_turn(
+        storage, sid, LANE, a2a("hello again", "m2"), "queue", echo, wait_timeout=2 * ttl
+    )
+    assert lapsed.lease_until == settled.lease_until, (
+        f"the cancelled run kept renewing its lease; the next turn ended {after.task.status}: "
+        f"{(after.task.status_message or {}).get('metadata')}"
+    )
+    if local_agentstore is not None:
+        renewals = [
+            s
+            for s in local_agentstore.statements
+            if s.at > settled_at and s.frame == "query" and held.lease_token in s.params
+        ]
+        assert renewals == [], f"{len(renewals)} renewals after the cancel"
+    assert after.task.status == "completed" and after.output == "reply to: hello again"
+    orphan = await task_of(storage, sid, LANE, "AST_h5")
+    assert orphan is not None and orphan.status == "failed"
+    assert orphan.status_message["metadata"]["livekit/reason"] == "worker-lost"
+    assert len(kept) == 1
+
+
+async def test_a_lease_dropped_without_stop_stops_renewing(
+    agentdb_worker: Callable[[str], AgentDBStorage],
+    local_agentstore: LocalAgentStore | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``Lease`` from ``ThreadDb.start_renewal`` (what the call's lane holds, storage/live.py)
+    dropped without ``stop()`` ends its renewal timer with it, so the lane lapses."""
+    ttl, interval = 2, 0.25
+    monkeypatch.setenv("LIVEKIT_AGENTDB_LEASE_TTL", str(ttl))
+    monkeypatch.setenv("LIVEKIT_AGENTDB_RENEW_INTERVAL", str(interval))
+    storage = agentdb_worker("wa")
+    sid = await new_session(storage, LANE)
+    db = await storage.open(sid)
+    reader = await storage.open(sid)
+    request = AcquireRequest(
+        lane=LANE,
+        holder="wa/voice",
+        lease_token="lease_dropped",
+        run_id="voice_1",
+        ts_ms=1_700_000_000_000,
+        run_started={"task_id": "voice_1", "stream_id": "voice_1", "channel": "voice"},
+    )
+    assert await db.acquire(request) is not None
+    lease = db.start_renewal(LANE, "wa/voice", "lease_dropped")
+    await asyncio.sleep(2.5 * interval)
+    renewing = await reader.lane(LANE)
+    del lease
+    gc.collect()
+
+    await asyncio.sleep(2.5 * interval)
+    settled = await reader.lane(LANE)
+    settled_at = time.monotonic()
+    await asyncio.sleep(ttl + 1)
+    lapsed = await reader.lane(LANE)
+    reader.close()
+    db.close()
+    assert renewing is not None and settled is not None and lapsed is not None
+    assert renewing.lease_token == "lease_dropped"
+    assert lapsed.lease_until == settled.lease_until, "the dropped lease kept renewing"
+    if local_agentstore is not None:
+        renewals = [
+            s
+            for s in local_agentstore.statements
+            if s.at > settled_at and s.frame == "query" and "lease_dropped" in s.params
+        ]
+        assert renewals == [], f"{len(renewals)} renewals after the drop"
 
 
 # -- input required --
