@@ -672,8 +672,9 @@ impl ThreadDb {
         Ok(!set.rows.is_empty())
     }
 
-    /// The renewal timer: [`RENEW`] at the configured interval until [`Lease::stop`], or until a
-    /// renew returns no row or fails, which marks the lease lost.
+    /// The renewal timer: [`RENEW`] at the configured interval until [`Lease::stop`], until the
+    /// last [`Lease`] handle is dropped, or until a renew returns no row or fails, which marks the
+    /// lease lost.
     pub fn start_renewal(&self, lane: &str, holder: &str, lease_token: &str) -> Lease {
         let inner = Arc::new(LeaseInner {
             lane: lane.to_owned(),
@@ -686,18 +687,23 @@ impl ThreadDb {
         });
         let db = self.clone();
         let lease = Lease { inner: inner.clone() };
+        // the timer holds no handle of its own: dropping the last one drops `LeaseInner`, whose
+        // `Drop` aborts it
+        let (lane, holder, token) = (inner.lane.clone(), inner.holder.clone(), inner.token.clone());
+        let handle = Arc::downgrade(&inner);
         let task = tokio::spawn(async move {
             let mut tick = tokio::time::interval(db.renew_interval);
             tick.tick().await;
             loop {
                 tick.tick().await;
-                let outcome = db.renew(&inner.lane, &inner.holder, &inner.token).await;
+                let outcome = db.renew(&lane, &holder, &token).await;
                 let reason = match outcome {
                     Ok(true) => continue,
-                    Ok(false) => format!("lease on lane {} was lost", inner.lane),
-                    Err(e) => format!("lease renewal on lane {} failed: {e}", inner.lane),
+                    Ok(false) => format!("lease on lane {lane} was lost"),
+                    Err(e) => format!("lease renewal on lane {lane} failed: {e}"),
                 };
-                log::warn!(target: "livekit.agents", lane = inner.lane.as_str(); "{reason}");
+                let Some(inner) = handle.upgrade() else { return };
+                log::warn!(target: "livekit.agents", lane = lane.as_str(); "{reason}");
                 *inner.reason.lock().expect("reason") = Some(reason);
                 inner.lost.store(true, Ordering::Release);
                 inner.notify.notify_waiters();
@@ -1376,5 +1382,90 @@ mod tests {
         assert!(matches!(StorageError::from(nf), StorageError::ThreadNotFound(_)));
         let other = WsdbError::Server { code: "exec".into(), message: "constraint".into() };
         assert!(matches!(StorageError::from(other), StorageError::Server { .. }));
+    }
+
+    /// A data plane that answers `Hello`, and every `Query` with one `version` row, which is a
+    /// renew that kept the lease; the count is the number of renews.
+    async fn renewing_server() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        use futures_util::{SinkExt as _, StreamExt as _};
+        use pb::client_message::Message as C;
+        use pb::server_message::Message as S;
+        use prost::Message as _;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/db", listener.local_addr().unwrap());
+        let renews = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = renews.clone();
+        tokio::spawn(async move {
+            loop {
+                let (tcp, _) = listener.accept().await.unwrap();
+                let seen = seen.clone();
+                tokio::spawn(async move {
+                    let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+                    while let Some(Ok(Message::Binary(b))) = ws.next().await {
+                        let msg = pb::ClientMessage::decode(b.as_ref()).unwrap();
+                        let replies = match msg.message {
+                            Some(C::Hello(_)) => vec![S::HelloOk(pb::HelloOk::default())],
+                            Some(C::Query(_)) => {
+                                seen.fetch_add(1, Ordering::SeqCst);
+                                vec![
+                                    S::Columns(pb::Columns {
+                                        names: vec!["version".into()],
+                                        statement: 0,
+                                    }),
+                                    S::ColumnBatch(crate::wire::encode_batch(
+                                        &[vec![SqlValue::Int(1)]],
+                                        1,
+                                    )),
+                                    S::Done(pb::Done { tip: 0, total_rows: 1 }),
+                                ]
+                            }
+                            _ => vec![],
+                        };
+                        for reply in replies {
+                            let resp = pb::ServerMessage {
+                                request_id: msg.request_id,
+                                message: Some(reply),
+                            };
+                            if ws.send(Message::binary(resp.encode_to_vec())).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        (url, renews)
+    }
+
+    #[tokio::test]
+    async fn a_dropped_lease_stops_renewing() {
+        let (url, renews) = renewing_server().await;
+        let minter = crate::TokenMinter::new("devkey", "secret").unwrap();
+        let conn = Conn::dial(crate::wsdb::Options::new(url, "DB_1"), minter).await.unwrap();
+        let db = ThreadDb::over(
+            conn,
+            Some(SCHEMA_VERSION),
+            Duration::from_secs(2),
+            Duration::from_millis(20),
+        );
+        let lease = db.start_renewal("lane", "holder", "token");
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(renews.load(Ordering::SeqCst) >= 3, "the timer renews while the lease is held");
+
+        let clone = lease.clone();
+        drop(lease);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let before = renews.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(renews.load(Ordering::SeqCst) > before, "a clone keeps the lease renewing");
+
+        drop(clone);
+        tokio::time::sleep(Duration::from_millis(50)).await; // a renew in flight lands
+        let dropped = renews.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(renews.load(Ordering::SeqCst), dropped, "a dropped lease kept renewing");
+        db.close();
     }
 }

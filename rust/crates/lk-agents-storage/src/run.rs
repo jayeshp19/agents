@@ -815,6 +815,18 @@ impl Run {
     }
 }
 
+/// A run dropped without [`Run::commit`] or [`Run::abandon`] (its turn cancelled from outside)
+/// stops renewing, so its lease lapses within the TTL and the next acquire fails its task
+/// `worker-lost`. The turn's `Boundary` holds a clone of the lease that the host may keep past
+/// the run, so the run stops the timer itself rather than wait for the last handle.
+impl Drop for Run {
+    fn drop(&mut self) {
+        if let Some(lease) = &self.lease {
+            lease.stop();
+        }
+    }
+}
+
 /// `Run._item_writes`: every stored item whose canonical JSON differs from what was loaded, with
 /// the A2A `messageId` it came from; the loaded ids no longer in the history, in loaded order.
 fn item_writes(
