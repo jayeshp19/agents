@@ -1,7 +1,8 @@
 """A local agentstore for the storage tests: SQLite behind the public API's agentstore routes.
 
-``agentdb_fixture.py`` points ``AgentDBStorage`` here when the environment names no project. It
-serves, on a loopback port, what the Rust client (``lk-agents-storage``) dials:
+``agentdb_fixture.py`` points ``AgentDBStorage`` here when the environment names no project and
+sets ``LIVEKIT_LOCAL_AGENTSTORE=1``. It serves, on a loopback port, what the Rust client
+(``lk-agents-storage``) dials:
 
 * ``/v0/agentstore/db``: the data plane, ``AgentDB.Wire`` over a WebSocket. Every statement is
   the SQL the client sent, run unchanged on one SQLite file per database: ``Exec``, ``Query``,

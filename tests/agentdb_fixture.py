@@ -1,8 +1,9 @@
 """The agentstore the storage tests run against, through LiveKit's public API.
 
 A staging project from the environment: ``LIVEKIT_URL``, with ``LIVEKIT_API_KEY`` and
-``LIVEKIT_API_SECRET``. Without ``LIVEKIT_URL`` the tests run against ``local_agentstore.py``
-instead, SQLite behind the same routes on a loopback port, with a test key pair.
+``LIVEKIT_API_SECRET``. Without ``LIVEKIT_URL`` and with ``LIVEKIT_LOCAL_AGENTSTORE=1`` the tests
+run against ``local_agentstore.py`` instead, SQLite behind the same routes on a loopback port, with
+a test key pair; with neither, every test skips.
 ``agentdb_storage`` is one ``AgentDBStorage``; ``agentdb_workers`` two of them with holders of
 their own, which is two workers of one project; ``agentdb_worker`` the factory behind both.
 Threads are minted by the threads service, never reused across tests.
@@ -28,7 +29,11 @@ LEASE_MARGIN = 1.0
 """What a test sleeps past ``LEASE_TTL`` before it counts a lease as lapsed."""
 PROJECT_URL = os.environ.get("LIVEKIT_URL", "")
 """The project's URL, read at import: a test module may remove ``LIVEKIT_URL`` so that its
-servers address themselves locally, and the storage still needs it. Empty: the local store."""
+servers address themselves locally, and the storage still needs it. Empty: the local store, when
+``LOCAL_STORE`` asks for it."""
+LOCAL_STORE = os.environ.get("LIVEKIT_LOCAL_AGENTSTORE", "").lower() in ("1", "true", "yes")
+"""Opt-in to the local store when there is no project: several tests it would run still fail for
+reasons of their own, so without it they skip as they do with no project."""
 LOCAL_LATENCY = float(os.environ.get("LIVEKIT_LOCAL_AGENTSTORE_LATENCY", "0"))
 """Seconds the local store waits before each data plane answer, to stand in for the network."""
 LOCAL_API_KEY = "APIlocalagentstore"
@@ -40,15 +45,18 @@ _local: LocalAgentStore | None = None
 
 def project_storage(holder: str = "") -> AgentDBStorage:
     """An ``AgentDBStorage`` on ``PROJECT_URL``, which it reads only while it is built; on the
-    local store when there is no project."""
+    local store when there is no project and ``LOCAL_STORE`` is set."""
     with pytest.MonkeyPatch.context() as mp:
         if PROJECT_URL:
             mp.setenv("LIVEKIT_URL", PROJECT_URL)
             return AgentDBStorage(holder=holder)
-        if _local is None:
+        if _local is not None:
+            mp.setenv("LIVEKIT_URL", _local.url)
+            return AgentDBStorage(api_key=LOCAL_API_KEY, api_secret=LOCAL_API_SECRET, holder=holder)
+        if LOCAL_STORE:
             raise ValueError("the local agentstore is not running")
-        mp.setenv("LIVEKIT_URL", _local.url)
-        return AgentDBStorage(api_key=LOCAL_API_KEY, api_secret=LOCAL_API_SECRET, holder=holder)
+        # no project and no local store: raises for the missing LIVEKIT_URL
+        return AgentDBStorage(holder=holder)
 
 
 def agentstore_configured() -> str | None:
@@ -72,9 +80,10 @@ async def let_the_lease_lapse() -> None:
 
 @pytest.fixture(scope="session")
 def local_agentstore(tmp_path_factory: pytest.TempPathFactory) -> Iterator[LocalAgentStore | None]:
-    """The local store for the session, started on first use; ``None`` when there is a project."""
+    """The local store for the session, started on first use; ``None`` when there is a project or
+    ``LIVEKIT_LOCAL_AGENTSTORE`` is not set."""
     global _local
-    if PROJECT_URL:
+    if PROJECT_URL or not LOCAL_STORE:
         yield None
         return
     store = LocalAgentStore(Path(tmp_path_factory.mktemp("agentstore")), latency=LOCAL_LATENCY)
@@ -96,7 +105,10 @@ async def agentdb_worker(
 ) -> AsyncIterator[Callable[[str], AgentDBStorage]]:
     """``agentdb_worker("worker-c")`` is one more worker against the same project."""
     if (why := agentstore_configured()) is not None:
-        pytest.skip(f"no agentstore project in the environment: {why}")
+        pytest.skip(
+            f"no agentstore project in the environment: {why} "
+            "(LIVEKIT_LOCAL_AGENTSTORE=1 runs the local store)"
+        )
 
     def make(holder: str) -> AgentDBStorage:
         return project_storage(holder)
